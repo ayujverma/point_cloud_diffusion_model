@@ -18,16 +18,12 @@
 #SBATCH -o logs/%x_%j.out
 #SBATCH -e logs/%x_%j.err
 #SBATCH -p gpu-a100
-#SBATCH -N 1
-#SBATCH -n 1
-#SBATCH --gpus-per-node=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
-#SBATCH -t 04:00:00
+#SBATCH -N 1                         # Single node (3 GPUs is enough for 5k samples)
+#SBATCH -n 1                         # 1 task (torchrun spawns 3 GPU workers)                    # Use all available memory
+#SBATCH -t 24:00:00
 #SBATCH -A CCR25016
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=ayuj@utexas.edu
-#SBATCH --export=ALL
 
 # ------------------------------
 # Load system modules
