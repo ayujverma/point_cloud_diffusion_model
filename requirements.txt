@@ -1,0 +1,31 @@
+# ===========================================================================
+# Rotation-Equivariant Rectified Flow — Dependencies
+# ===========================================================================
+#
+# Install with:  pip install -r requirements.txt
+#
+# For TACC / HPC, install into a venv:
+#   python -m venv venv && source venv/bin/activate && pip install -r requirements.txt
+# ===========================================================================
+
+# --- Core ---
+torch>=2.1.0
+einops>=0.7.0
+numpy>=1.24.0
+
+# --- Optimal Transport (Sinkhorn loss) ---
+geomloss>=0.2.6
+pykeops>=2.1          # GPU-accelerated backend for geomloss (optional but recommended)
+
+# --- Logging ---
+wandb>=0.16.0
+
+# --- Visualisation ---
+matplotlib>=3.7.0
+Pillow>=10.0.0
+
+# --- Data ---
+# (no extra deps — .npy files loaded via numpy)
+
+# --- Optional: interactive 3D viewer ---
+# open3d>=0.17.0      # uncomment if you want Open3D interactive windows

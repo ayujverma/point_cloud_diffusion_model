@@ -1,0 +1,37 @@
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+*.so
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Training artifacts
+checkpoints/
+visualisations/
+logs/
+wandb/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large files
+*.pt
+*.pth
+*.ckpt
+*.npy
