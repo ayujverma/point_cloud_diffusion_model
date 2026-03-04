@@ -23,7 +23,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=0                      # Use all available memory
 #SBATCH -t 48:00:00
-#SBATCH -A ASC25079
+#SBATCH -A CCR25016
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=ayuj@utexas.edu
 #SBATCH --export=ALL

@@ -24,7 +24,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH -t 04:00:00
-#SBATCH -A ASC25079
+#SBATCH -A CCR25016
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=ayuj@utexas.edu
 #SBATCH --export=ALL
