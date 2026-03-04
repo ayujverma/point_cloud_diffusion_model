@@ -12,24 +12,27 @@
 # per node and 8 nodes total (24 GPUs).
 #===========================================================================
 
-#SBATCH --job-name=rectflow-pc
-#SBATCH --output=logs/%x_%j.out
-#SBATCH --error=logs/%x_%j.err
-#SBATCH --partition=gpu-a100
-#SBATCH --nodes=8
-#SBATCH --ntasks-per-node=3
+#SBATCH -J rectflow-pc
+#SBATCH -o logs/%x_%j.out
+#SBATCH -e logs/%x_%j.err
+#SBATCH -p gpu-a100
+#SBATCH -N 8
+#SBATCH -n 8
+#SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=3
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=0                      # Use all available memory
-#SBATCH --time=24:00:00
+#SBATCH -t 24:00:00
+#SBATCH -A ASC25079
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=ayuj@utexas.edu
 #SBATCH --export=ALL
 
-# ---- Module setup (adjust for your TACC system) ----
+# ------------------------------
+# Load system modules
+# ------------------------------
 module purge
-module load gcc/11.2.0
-module load cuda/12.0
-module load python3/3.10
-module load tacc-apptainer 2>/dev/null || true   # optional container runtime
+module load cuda/12.2
 
 echo "=========================================="
 echo " Job ID:       $SLURM_JOB_ID"
@@ -73,14 +76,12 @@ echo "Data staging complete."
 mkdir -p "${SLURM_SUBMIT_DIR}/logs"
 mkdir -p "${SLURM_SUBMIT_DIR}/checkpoints"
 
-# ---- Activate virtual environment ----
-# Adjust this path to your actual venv/conda env
-if [ -d "${SLURM_SUBMIT_DIR}/venv" ]; then
-    source "${SLURM_SUBMIT_DIR}/venv/bin/activate"
-elif [ -d "$HOME/miniconda3" ]; then
-    source "$HOME/miniconda3/etc/profile.d/conda.sh"
-    conda activate rectflow 2>/dev/null || true
-fi
+# ------------------------------
+# Activate conda environment
+# ------------------------------
+source /work/10692/ayuj/miniconda3/etc/profile.d/conda.sh
+conda activate rectflow
+export PYTHONUNBUFFERED=1
 
 # ---- Determine NODE_RANK for this node ----
 # srun will launch this script on every node; we compute the node rank

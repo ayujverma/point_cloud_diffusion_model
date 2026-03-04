@@ -1,80 +1,77 @@
 #!/bin/bash
 #===========================================================================
-# SLURM Job Script — TACC A100: TRAINING
-# Rotation-Equivariant Rectified Flow (Multi-Node DDP)
+# SLURM Job Script — TACC A100: TRAINING (Single-Node, 3 GPUs)
+# Rotation-Equivariant Rectified Flow
 #===========================================================================
 #
-# Trains with FPS subsampling: 15k-point clouds are downsampled to 2048
-# during training for memory efficiency.  KNN-local attention (k=32)
-# keeps per-layer cost at O(N·K) instead of O(N²).
+# 5000 training samples  ×  1 node  ×  3 A100 GPUs
+# Effective batch = 32 × 3 = 96  →  ~52 steps/epoch  →  ~78k updates
+#
+# Trains with FPS subsampling: 15k-point clouds → 2048 points.
+# KNN-local attention (k=32) keeps memory at O(N·K).
 #
 # Submit with:  sbatch scripts/train_tacc.sh
 #===========================================================================
 
-#SBATCH --job-name=rectflow-train
-#SBATCH --output=logs/%x_%j.out
-#SBATCH --error=logs/%x_%j.err
-#SBATCH --partition=gpu-a100
-#SBATCH --nodes=8
-#SBATCH --ntasks-per-node=3
+#SBATCH -J rectflow-train
+#SBATCH -o logs/%x_%j.out
+#SBATCH -e logs/%x_%j.err
+#SBATCH -p gpu-a100
+#SBATCH -N 1                         # Single node (3 GPUs is enough for 5k samples)
+#SBATCH -n 1                         # 1 task (torchrun spawns 3 GPU workers)
 #SBATCH --gpus-per-node=3
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=0                      # Use all available memory
-#SBATCH --time=48:00:00
+#SBATCH -t 48:00:00
+#SBATCH -A ASC25079
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=ayuj@utexas.edu
 #SBATCH --export=ALL
 
-# ---- Module setup (adjust for your TACC system) ----
+# ------------------------------
+# Load system modules
+# ------------------------------
 module purge
-module load gcc/11.2.0
-module load cuda/12.0
-module load python3/3.10
-module load tacc-apptainer 2>/dev/null || true
+module load cuda/12.2
 
 echo "=========================================="
 echo " TRAINING — Rectified Flow Point Cloud"
 echo "=========================================="
 echo " Job ID:       $SLURM_JOB_ID"
 echo " Job Name:     $SLURM_JOB_NAME"
-echo " Nodes:        $SLURM_JOB_NODELIST"
-echo " Tasks/Node:   $SLURM_NTASKS_PER_NODE"
-echo " GPUs/Node:    3"
-echo " Total GPUs:   $(( SLURM_NNODES * 3 ))"
+echo " Node:         $SLURM_JOB_NODELIST"
+echo " GPUs:         3x A100"
 echo "=========================================="
 
-# ---- Distributed training variables ----
-export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
-export MASTER_PORT=29500
-
-NNODES=$SLURM_NNODES
+# ---- Single-node: no multi-node setup needed ----
 NGPUS_PER_NODE=3
-WORLD_SIZE=$(( NNODES * NGPUS_PER_NODE ))
 
-echo " MASTER_ADDR:  $MASTER_ADDR"
-echo " MASTER_PORT:  $MASTER_PORT"
-echo " WORLD_SIZE:   $WORLD_SIZE"
-
-# ---- Hyperparameters (edit here) ----
+# ---- Hyperparameters ----
 N_POINTS=15000          # Full resolution loaded from disk
-TRAIN_N_POINTS=2048     # FPS subsample during training
+TRAIN_N_POINTS=2048     # FPS subsample during training (15k → 2048)
 KNN_K=32                # KNN neighbours for local attention (0 = global)
-CHANNELS=128
-N_HEADS=8
-ENC_DEPTH=6
-DEC_DEPTH=6
-LATENT_DIM=256
-BATCH_SIZE=32           # Per-GPU batch size
-LR=1e-4
-EPOCHS=300
-WARMUP=10
-GRAD_CLIP=1.0
+CHANNELS=128            # VN channel width
+N_HEADS=8               # Attention heads
+ENC_DEPTH=6             # Encoder transformer blocks
+DEC_DEPTH=6             # Decoder transformer blocks
+LATENT_DIM=256          # Shape latent z dimension
+BATCH_SIZE=32           # Per-GPU batch size (effective = 32 × 3 = 96)
+LR=3e-4                 # Linear scaling: base 1e-4 × 3 GPUs
+EPOCHS=1500             # 1500 × 52 steps ≈ 78k gradient updates
+WARMUP=15               # Longer warmup for larger effective LR
+GRAD_CLIP=1.0           # Max gradient norm (stabilises training)
+SAVE_EVERY=100           # Checkpoint every N epochs
+VAL_EVERY=50             # Validation every N epochs
 WANDB_PROJECT="rectified-flow-pc"
 
 echo ""
 echo " N_POINTS:       $N_POINTS (loaded from disk)"
 echo " TRAIN_N_POINTS: $TRAIN_N_POINTS (FPS subsample for training)"
 echo " KNN_K:          $KNN_K"
-echo " BATCH_SIZE:     $BATCH_SIZE (per GPU)"
-echo " EPOCHS:         $EPOCHS"
+echo " BATCH_SIZE:     $BATCH_SIZE (per GPU, effective = $(( BATCH_SIZE * NGPUS_PER_NODE )))"
+echo " LR:             $LR (linear scaled for $NGPUS_PER_NODE GPUs)"
+echo " EPOCHS:         $EPOCHS (~$(( EPOCHS * 5000 / (BATCH_SIZE * NGPUS_PER_NODE) )) gradient updates)"
+echo " WARMUP:         $WARMUP epochs"
 echo "=========================================="
 
 # ---- Stage data to local scratch for fast I/O ----
@@ -94,58 +91,42 @@ echo "Data staging complete."
 mkdir -p "${SLURM_SUBMIT_DIR}/logs"
 mkdir -p "${SLURM_SUBMIT_DIR}/checkpoints"
 
-# ---- Activate environment ----
-if [ -d "${SLURM_SUBMIT_DIR}/venv" ]; then
-    source "${SLURM_SUBMIT_DIR}/venv/bin/activate"
-elif [ -d "$HOME/miniconda3" ]; then
-    source "$HOME/miniconda3/etc/profile.d/conda.sh"
-    conda activate rectflow 2>/dev/null || true
-fi
+# ------------------------------
+# Activate conda environment
+# ------------------------------
+source /work/10692/ayuj/miniconda3/etc/profile.d/conda.sh
+conda activate rectflow
+export PYTHONUNBUFFERED=1
 
-# ---- Launch training (one torchrun per node via srun) ----
-srun --nodes=1 --ntasks=1 --exclusive bash -c "
-    export MASTER_ADDR=${MASTER_ADDR}
-    export MASTER_PORT=${MASTER_PORT}
+# ---- Launch training (single-node, torchrun handles 3 GPUs) ----
+echo ""
+echo "Launching torchrun with ${NGPUS_PER_NODE} GPUs..."
 
-    # Compute NODE_RANK inside srun
-    HOSTS=(\$(scontrol show hostnames \"$SLURM_JOB_NODELIST\"))
-    ME=\$(hostname -s)
-    for i in \"\${!HOSTS[@]}\"; do
-        if [ \"\${HOSTS[\$i]}\" == \"\$ME\" ]; then
-            export NODE_RANK=\$i
-            break
-        fi
-    done
+torchrun \
+    --nproc_per_node=${NGPUS_PER_NODE} \
+    --nnodes=1 \
+    --node_rank=0 \
+    --master_addr=localhost \
+    --master_port=29500 \
+    ${SLURM_SUBMIT_DIR}/train.py \
+        --data_root ${LOCAL_SCRATCH} \
+        --n_points ${N_POINTS} \
+        --train_n_points ${TRAIN_N_POINTS} \
+        --knn_k ${KNN_K} \
+        --channels ${CHANNELS} \
+        --n_heads ${N_HEADS} \
+        --enc_depth ${ENC_DEPTH} \
+        --dec_depth ${DEC_DEPTH} \
+        --latent_dim ${LATENT_DIM} \
+        --batch_size ${BATCH_SIZE} \
+        --lr ${LR} \
+        --epochs ${EPOCHS} \
+        --warmup_epochs ${WARMUP} \
+        --grad_clip ${GRAD_CLIP} \
+        --wandb_project ${WANDB_PROJECT} \
+        --ckpt_dir ${SLURM_SUBMIT_DIR}/checkpoints \
+        --save_every ${SAVE_EVERY} \
+        --val_every ${VAL_EVERY} \
+        --amp
 
-    echo \"Launching torchrun on \$ME (NODE_RANK=\$NODE_RANK)\"
-
-    torchrun \\
-        --nproc_per_node=${NGPUS_PER_NODE} \\
-        --nnodes=${NNODES} \\
-        --node_rank=\${NODE_RANK} \\
-        --master_addr=${MASTER_ADDR} \\
-        --master_port=${MASTER_PORT} \\
-        ${SLURM_SUBMIT_DIR}/train.py \\
-            --data_root ${LOCAL_SCRATCH} \\
-            --n_points ${N_POINTS} \\
-            --train_n_points ${TRAIN_N_POINTS} \\
-            --knn_k ${KNN_K} \\
-            --channels ${CHANNELS} \\
-            --n_heads ${N_HEADS} \\
-            --enc_depth ${ENC_DEPTH} \\
-            --dec_depth ${DEC_DEPTH} \\
-            --latent_dim ${LATENT_DIM} \\
-            --batch_size ${BATCH_SIZE} \\
-            --lr ${LR} \\
-            --epochs ${EPOCHS} \\
-            --warmup_epochs ${WARMUP} \\
-            --grad_clip ${GRAD_CLIP} \\
-            --wandb_project ${WANDB_PROJECT} \\
-            --ckpt_dir ${SLURM_SUBMIT_DIR}/checkpoints \\
-            --save_every 10 \\
-            --val_every 5 \\
-            --amp
-" &
-
-wait
 echo "Training job $SLURM_JOB_ID finished."

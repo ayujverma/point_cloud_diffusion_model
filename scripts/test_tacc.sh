@@ -14,24 +14,26 @@
 #   - A trained checkpoint at $CHECKPOINT (edit below)
 #===========================================================================
 
-#SBATCH --job-name=rectflow-test
-#SBATCH --output=logs/%x_%j.out
-#SBATCH --error=logs/%x_%j.err
-#SBATCH --partition=gpu-a100
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
+#SBATCH -J rectflow-test
+#SBATCH -o logs/%x_%j.out
+#SBATCH -e logs/%x_%j.err
+#SBATCH -p gpu-a100
+#SBATCH -N 1
+#SBATCH -n 1
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
-#SBATCH --time=04:00:00
+#SBATCH -t 04:00:00
+#SBATCH -A ASC25079
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=ayuj@utexas.edu
 #SBATCH --export=ALL
 
-# ---- Module setup ----
+# ------------------------------
+# Load system modules
+# ------------------------------
 module purge
-module load gcc/11.2.0
-module load cuda/12.0
-module load python3/3.10
-module load tacc-apptainer 2>/dev/null || true
+module load cuda/12.2
 
 echo "=========================================="
 echo " TESTING — Full-Resolution Inference"
@@ -92,13 +94,12 @@ echo "Data staging complete."
 mkdir -p "$OUTPUT_DIR"
 mkdir -p "${SLURM_SUBMIT_DIR}/logs"
 
-# ---- Activate environment ----
-if [ -d "${SLURM_SUBMIT_DIR}/venv" ]; then
-    source "${SLURM_SUBMIT_DIR}/venv/bin/activate"
-elif [ -d "$HOME/miniconda3" ]; then
-    source "$HOME/miniconda3/etc/profile.d/conda.sh"
-    conda activate rectflow 2>/dev/null || true
-fi
+# ------------------------------
+# Activate conda environment
+# ------------------------------
+source /work/10692/ayuj/miniconda3/etc/profile.d/conda.sh
+conda activate rectflow
+export PYTHONUNBUFFERED=1
 
 # ---- Run full-resolution inference ----
 echo ""
