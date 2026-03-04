@@ -62,7 +62,8 @@ WARMUP=15               # Longer warmup for larger effective LR
 GRAD_CLIP=1.0           # Max gradient norm (stabilises training)
 SAVE_EVERY=100           # Checkpoint every N epochs
 VAL_EVERY=50             # Validation every N epochs
-WANDB_PROJECT="rectified-flow-pc"
+WANDB_PROJECT="Dense 3D Point Correspondences"
+WANDB_ENTITY="ayuj-the-university-of-texas-at-austin"
 
 echo ""
 echo " N_POINTS:       $N_POINTS (loaded from disk)"
@@ -123,7 +124,8 @@ torchrun \
         --epochs ${EPOCHS} \
         --warmup_epochs ${WARMUP} \
         --grad_clip ${GRAD_CLIP} \
-        --wandb_project ${WANDB_PROJECT} \
+        --wandb_project "${WANDB_PROJECT}" \
+        --wandb_entity "${WANDB_ENTITY}" \
         --ckpt_dir ${SLURM_SUBMIT_DIR}/checkpoints \
         --save_every ${SAVE_EVERY} \
         --val_every ${VAL_EVERY} \
