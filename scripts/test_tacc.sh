@@ -31,6 +31,9 @@
 module purge
 module load cuda/12.2
 
+# Change to repo directory so Python imports resolve
+cd ${SLURM_SUBMIT_DIR}
+
 echo "=========================================="
 echo " TESTING — Full-Resolution Inference"
 echo "=========================================="

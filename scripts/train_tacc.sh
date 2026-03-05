@@ -30,6 +30,11 @@
 module purge
 module load cuda/12.2
 
+# Change to repo directory so Python imports resolve
+# If SLURM_SUBMIT_DIR isn't set (interactive test), default to current dir
+SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-$(pwd)}
+cd "${SLURM_SUBMIT_DIR}"
+
 echo "=========================================="
 echo " TRAINING — Rectified Flow Point Cloud"
 echo "=========================================="
@@ -85,8 +90,10 @@ fi
 echo "Data staging complete."
 
 # ---- Create directories ----
-mkdir -p "${SLURM_SUBMIT_DIR}/logs"
-mkdir -p "${SLURM_SUBMIT_DIR}/checkpoints"
+CKPT_DIR="${SLURM_SUBMIT_DIR}/checkpoints/${SLURM_JOB_ID}"
+LOGS_DIR="${SLURM_SUBMIT_DIR}/logs/${SLURM_JOB_ID}"
+mkdir -p "${CKPT_DIR}"
+mkdir -p "${LOGS_DIR}"
 
 # ------------------------------
 # Activate conda environment
@@ -122,7 +129,7 @@ torchrun \
         --grad_clip ${GRAD_CLIP} \
         --wandb_project "${WANDB_PROJECT}" \
         --wandb_entity "${WANDB_ENTITY}" \
-        --ckpt_dir ${SLURM_SUBMIT_DIR}/checkpoints \
+        --ckpt_dir ${CKPT_DIR} \
         --save_every ${SAVE_EVERY} \
         --val_every ${VAL_EVERY} \
         --amp

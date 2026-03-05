@@ -106,6 +106,8 @@ def parse_args() -> argparse.Namespace:
                    help="W&B project name.")
     p.add_argument("--wandb_entity", type=str, default="ayuj-the-university-of-texas-at-austin")
     p.add_argument("--run_name", type=str, default=None)
+    p.add_argument("--no_wandb", action="store_true",
+                   help="Disable W&B logging entirely (useful for smoke tests).")
     p.add_argument("--ckpt_dir", type=str, default="checkpoints",
                    help="Checkpoint directory.")
     p.add_argument("--save_every", type=int, default=10,
@@ -297,7 +299,7 @@ def main():
 
     # ---- W&B init (rank-0 only) ----
     wandb_run = None
-    if is_main_process(rank):
+    if is_main_process(rank) and not args.no_wandb:
         try:
             import wandb
             wandb_run = wandb.init(
@@ -308,6 +310,8 @@ def main():
             )
         except ImportError:
             print("  [Warning] wandb not installed — logging disabled.")
+        except Exception as e:
+            print(f"  [Warning] wandb init failed ({e}) — logging disabled.")
 
     # ---- Build data loaders ----
     loaders = build_dataloaders(

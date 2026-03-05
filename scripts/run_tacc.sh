@@ -29,6 +29,9 @@
 module purge
 module load cuda/12.2
 
+# Change to repo directory so Python imports resolve
+cd ${SLURM_SUBMIT_DIR}
+
 echo "=========================================="
 echo " Job ID:       $SLURM_JOB_ID"
 echo " Job Name:     $SLURM_JOB_NAME"
