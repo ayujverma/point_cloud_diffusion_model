@@ -278,7 +278,7 @@ class RectifiedFlowMatcher(nn.Module):
         with torch.no_grad():
             # Approximate endpoint: template + v_pred  (single Euler step)
             x_1_approx = template_sub + v_pred
-        loss_ot = self.ot_loss_fn(x_1_approx, target_sub)
+        loss_ot = self.ot_loss_fn(x_1_approx, target_sub).mean()  # [B] -> scalar
 
         # (c) Template regularisation — keep ALL template points near the
         #     unit sphere (not just the subsample) so the full template
