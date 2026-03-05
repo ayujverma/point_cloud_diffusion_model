@@ -36,7 +36,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 
 from models.vn_transformer import FlowTransformer
 from core.flow_matcher import RectifiedFlowMatcher
@@ -235,7 +235,7 @@ def train_one_epoch(
 
         optimiser.zero_grad(set_to_none=True)
 
-        with autocast(enabled=args.amp):
+        with autocast("cuda", enabled=args.amp):
             losses = flow_matcher(points)
 
         scaler.scale(losses["loss"]).backward()
@@ -273,7 +273,7 @@ def validate(
 
     for points in loader:
         points = points.to(device, non_blocking=True)
-        with autocast(enabled=args.amp):
+        with autocast("cuda", enabled=args.amp):
             losses = flow_matcher(points)
         for k in running:
             running[k] += losses[k].item()
@@ -365,7 +365,7 @@ def main():
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
-    scaler = GradScaler(enabled=args.amp)
+    scaler = GradScaler("cuda", enabled=args.amp)
 
     # ---- Resume from checkpoint ----
     start_epoch = 0
