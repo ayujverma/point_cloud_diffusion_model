@@ -49,7 +49,7 @@ NGPUS_PER_NODE=3
 
 # ---- Hyperparameters ----
 N_POINTS=15000          # Full resolution loaded from disk
-TRAIN_N_POINTS=2048     # FPS subsample during training (15k → 2048)
+TRAIN_N_POINTS=1024     # FPS subsample during training (15k → 1024); halved to reduce KNN memory
 KNN_K=32                # KNN neighbours for local attention (0 = global)
 CHANNELS=128            # VN channel width
 N_HEADS=8               # Attention heads
@@ -57,11 +57,11 @@ ENC_DEPTH=6             # Encoder transformer blocks
 DEC_DEPTH=6             # Decoder transformer blocks
 LATENT_DIM=256          # Shape latent z dimension
 BATCH_SIZE=16           # Per-GPU batch size (effective = 16 × 3 = 48); use 32 if no OOM
-LR=3e-4                 # Linear scaling: base 1e-4 × 3 GPUs
-EPOCHS=1500             # 1500 × 52 steps ≈ 78k gradient updates
-WARMUP=15               # Longer warmup for larger effective LR
+LR=1.5e-4               # Linear scaling: base 1e-4 × 3 GPUs × (16/32 batch) = 1.5e-4
+EPOCHS=1500             # fits in 48h with 3 GPUs (~90-100s/epoch)
+WARMUP=10               # Warmup epochs
 GRAD_CLIP=1.0           # Max gradient norm (stabilises training)
-SAVE_EVERY=100           # Checkpoint every N epochs
+SAVE_EVERY=100            # Checkpoint every N epochs
 VAL_EVERY=50             # Validation every N epochs
 WANDB_PROJECT="Dense 3D Point Correspondences"
 WANDB_ENTITY="ayuj-the-university-of-texas-at-austin"
@@ -134,6 +134,6 @@ torchrun \
         --save_every ${SAVE_EVERY} \
         --val_every ${VAL_EVERY} \
         --amp \
-        --grad_ckpt
+        # --grad_ckpt
 
 echo "Training job $SLURM_JOB_ID finished."
