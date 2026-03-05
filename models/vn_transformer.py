@@ -38,6 +38,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
+from torch.utils.checkpoint import checkpoint as gradient_checkpoint
 
 from core.point_ops import knn, knn_gather_vn, farthest_point_sample, fps_gather
 
@@ -352,9 +353,11 @@ class VNEncoder(nn.Module):
         depth: int = 6,
         latent_dim: int = 256,
         knn_k: int = 0,                # 0 = global attention, >0 = local
+        use_checkpoint: bool = False,  # gradient checkpointing to save VRAM
     ):
         super().__init__()
         self.knn_k = knn_k
+        self.use_checkpoint = use_checkpoint
         self.input_proj = VNLinear(in_channels, channels)
         # Encoder blocks use plain VNLayerNorm (no adaptive conditioning)
         self.blocks = nn.ModuleList([
@@ -395,7 +398,10 @@ class VNEncoder(nn.Module):
         x = self.input_proj(x)                                  # [B, N, 3, C]
 
         for block in self.blocks:
-            x = block(x, knn_idx=knn_idx)
+            if self.use_checkpoint:
+                x = gradient_checkpoint(block, x, knn_idx, use_reentrant=False)
+            else:
+                x = block(x, knn_idx=knn_idx)
 
         x = self.norm(x)
 
@@ -484,12 +490,14 @@ class FlowTransformer(nn.Module):
         latent_dim: int = 256,
         time_dim: int = 128,
         knn_k: int = 0,
+        use_checkpoint: bool = False,  # gradient checkpointing to save VRAM
     ):
         super().__init__()
         self.n_points = n_points
         self.channels = channels
         self.latent_dim = latent_dim
         self.knn_k = knn_k
+        self.use_checkpoint = use_checkpoint
 
         # --- Learnable canonical template  [1, N, 3] ---
         self.template = nn.Parameter(
@@ -501,6 +509,7 @@ class FlowTransformer(nn.Module):
         self.encoder = VNEncoder(
             in_channels=1, channels=channels, n_heads=n_heads,
             depth=enc_depth, latent_dim=latent_dim, knn_k=knn_k,
+            use_checkpoint=use_checkpoint,
         )
 
         # --- Time embedding (scalar) ---
@@ -610,7 +619,10 @@ class FlowTransformer(nn.Module):
         h = self.dec_input_proj(h)                               # [B, N, 3, C]
 
         for block in self.dec_blocks:
-            h = block(h, cond, knn_idx=knn_idx)
+            if self.use_checkpoint:
+                h = gradient_checkpoint(block, h, cond, knn_idx, use_reentrant=False)
+            else:
+                h = block(h, cond, knn_idx=knn_idx)
 
         h = self.dec_norm(h, cond)
         v = self.output_proj(h).squeeze(-1)                      # [B, N, 3]

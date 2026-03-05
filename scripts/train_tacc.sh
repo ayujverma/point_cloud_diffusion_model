@@ -56,7 +56,7 @@ N_HEADS=8               # Attention heads
 ENC_DEPTH=6             # Encoder transformer blocks
 DEC_DEPTH=6             # Decoder transformer blocks
 LATENT_DIM=256          # Shape latent z dimension
-BATCH_SIZE=32           # Per-GPU batch size (effective = 32 × 3 = 96)
+BATCH_SIZE=16           # Per-GPU batch size (effective = 16 × 3 = 48); use 32 if no OOM
 LR=3e-4                 # Linear scaling: base 1e-4 × 3 GPUs
 EPOCHS=1500             # 1500 × 52 steps ≈ 78k gradient updates
 WARMUP=15               # Longer warmup for larger effective LR
@@ -101,6 +101,7 @@ mkdir -p "${LOGS_DIR}"
 source /work/10692/ayuj/miniconda3/etc/profile.d/conda.sh
 conda activate rectflow
 export PYTHONUNBUFFERED=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # ---- Launch training (single-node, torchrun handles 3 GPUs) ----
 echo ""
@@ -132,6 +133,7 @@ torchrun \
         --ckpt_dir ${CKPT_DIR} \
         --save_every ${SAVE_EVERY} \
         --val_every ${VAL_EVERY} \
-        --amp
+        --amp \
+        --grad_ckpt
 
 echo "Training job $SLURM_JOB_ID finished."

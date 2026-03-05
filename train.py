@@ -100,6 +100,8 @@ def parse_args() -> argparse.Namespace:
                    help="Use automatic mixed precision.")
     p.add_argument("--no_amp", action="store_true",
                    help="Disable AMP.")
+    p.add_argument("--grad_ckpt", action="store_true", default=False,
+                   help="Enable gradient checkpointing to reduce VRAM (~30%% slower, ~4x less memory).")
 
     # --- Logging / Checkpointing ---
     p.add_argument("--wandb_project", type=str, default="rectified-flow-pc",
@@ -335,6 +337,7 @@ def main():
         latent_dim=args.latent_dim,
         time_dim=args.time_dim,
         knn_k=args.knn_k,
+        use_checkpoint=args.grad_ckpt,
     ).to(device)
 
     if is_main_process(rank):
