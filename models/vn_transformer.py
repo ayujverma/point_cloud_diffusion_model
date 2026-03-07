@@ -61,14 +61,11 @@ class VNLinear(nn.Module):
         # Weight: [C_out, C_in] — shared across the 3 spatial dims
         self.weight = nn.Parameter(torch.randn(out_channels, in_channels) * math.sqrt(2.0 / in_channels))
         # Bias breaks equivariance → default off, but allowed for ablations
-        self.bias = nn.Parameter(torch.zeros(1, 1, 1, out_channels)) if bias else None
+        self.bias = nn.Parameter(torch.zeros(out_channels)) if bias else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x: [B, N, 3, C_in] → [B, N, 3, C_out]"""
-        out = torch.einsum("bnsi, oi -> bnso", x, self.weight)
-        if self.bias is not None:
-            out = out + self.bias
-        return out
+        return F.linear(x, self.weight, self.bias)
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +120,7 @@ class VNLayerNorm(nn.Module):
     def __init__(self, channels: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
-        self.gamma = nn.Parameter(torch.ones(1, 1, 1, channels))
+        self.gamma = nn.Parameter(torch.ones(channels))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x: [B, N, 3, C] → [B, N, 3, C]"""
@@ -133,7 +130,7 @@ class VNLayerNorm(nn.Module):
         mean_norm = norm.mean(dim=-1, keepdim=True)
         # Normalise and rescale
         x_normed = x / (mean_norm + self.eps)
-        return self.gamma * x_normed
+        return self.gamma.view(1, 1, 1, -1) * x_normed
 
 
 # ---------------------------------------------------------------------------
