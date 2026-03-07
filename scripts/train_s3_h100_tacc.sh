@@ -29,8 +29,8 @@ module load cuda/12.2
 export CUDA_HOME=$TACC_CUDA_DIR
 export CUDA_PATH=$TACC_CUDA_DIR
 
-# Change to repo directory so Python imports resolve
-SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-$(pwd)}
+# Change to repo directory
+SLURM_SUBMIT_DIR="/work/10692/ayuj/point_cloud_diffusion_model"
 cd "${SLURM_SUBMIT_DIR}"
 
 echo "=========================================="
