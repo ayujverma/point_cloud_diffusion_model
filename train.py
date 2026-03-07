@@ -348,9 +348,7 @@ def main():
               f"KNN-k: {args.knn_k or 'global'}")
 
     # Wrap in DDP if multi-GPU
-    if world_size > 1:
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank,
-                     find_unused_parameters=False)
+    # (Moved to wrap flow_matcher instead, since flow_matcher calls non-forward model methods)
 
     # ---- Flow Matcher (training wrapper) ----
     flow_matcher = RectifiedFlowMatcher(
@@ -361,6 +359,10 @@ def main():
         sinkhorn_reg=args.sinkhorn_reg,
         train_n_points=args.train_n_points,
     ).to(device)
+
+    if world_size > 1:
+        flow_matcher = DDP(flow_matcher, device_ids=[local_rank], output_device=local_rank,
+                           find_unused_parameters=False)
 
     # ---- Optimiser ----
     optimiser = torch.optim.AdamW(
