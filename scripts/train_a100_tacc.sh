@@ -34,7 +34,8 @@ export CUDA_PATH=$TACC_CUDA_DIR
 
 # Change to repo directory so Python imports resolve
 # If SLURM_SUBMIT_DIR isn't set (interactive test), default to current dir
-SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-$(pwd)}
+REPO_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )"
+SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-$REPO_DIR}
 cd "${SLURM_SUBMIT_DIR}"
 
 echo "=========================================="
@@ -103,7 +104,6 @@ mkdir -p "${LOGS_DIR}"
 source /work/10692/ayuj/miniconda3/etc/profile.d/conda.sh
 conda activate rectflow
 export PYTHONUNBUFFERED=1
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # ---- Launch training (single-node, torchrun handles 3 GPUs) ----
 echo ""

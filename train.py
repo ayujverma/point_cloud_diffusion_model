@@ -362,7 +362,7 @@ def main():
 
     if world_size > 1:
         flow_matcher = DDP(flow_matcher, device_ids=[local_rank], output_device=local_rank,
-                           find_unused_parameters=False)
+                           find_unused_parameters=False, gradient_as_bucket_view=True)
 
     # ---- Optimiser ----
     optimiser = torch.optim.AdamW(
