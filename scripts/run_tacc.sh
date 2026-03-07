@@ -133,7 +133,7 @@ srun --nodes=1 --ntasks=1 --exclusive bash -c "
             --epochs 300 \\
             --warmup_epochs 10 \\
             --grad_clip 1.0 \\
-            --wandb_project rectified-flow-pc \\
+            --wandb_project dense-3d-point-correspondences \\
             --ckpt_dir ${SLURM_SUBMIT_DIR}/checkpoints \\
             --save_every 10 \\
             --val_every 5 \\

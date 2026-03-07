@@ -64,7 +64,7 @@ WARMUP=15               # Warmup epochs (ramp LR from 0 → 2e-4 over 15 epochs)
 GRAD_CLIP=1.0           # Max gradient norm
 SAVE_EVERY=100           # Checkpoint every N epochs
 VAL_EVERY=50           # Validation every N epochs
-WANDB_PROJECT="Dense 3D Point Correspondences"
+WANDB_PROJECT="dense-3d-point-correspondences"
 WANDB_ENTITY="ayuj-the-university-of-texas-at-austin"
 
 echo ""
