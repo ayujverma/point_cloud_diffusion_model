@@ -106,7 +106,7 @@ def parse_args() -> argparse.Namespace:
     # --- Logging / Checkpointing ---
     p.add_argument("--wandb_project", type=str, default="rectified-flow-pc",
                    help="W&B project name.")
-    p.add_argument("--wandb_entity", type=str, default="ayuj-the-university-of-texas-at-austin")
+    p.add_argument("--wandb_entity", type=str, default="dense-3d-point-correspondences")
     p.add_argument("--run_name", type=str, default=None)
     p.add_argument("--no_wandb", action="store_true",
                    help="Disable W&B logging entirely (useful for smoke tests).")

@@ -64,7 +64,7 @@ GRAD_CLIP=1.0           # Max gradient norm (stabilises training)
 SAVE_EVERY=100            # Checkpoint every N epochs
 VAL_EVERY=50             # Validation every N epochs
 WANDB_PROJECT="dense-3d-point-correspondences"
-WANDB_ENTITY="ayuj-the-university-of-texas-at-austin"
+WANDB_ENTITY="dense-3d-point-correspondences"
 
 echo ""
 echo " N_POINTS:       $N_POINTS (loaded from disk)"
