@@ -29,6 +29,8 @@
 # ------------------------------
 module purge
 module load cuda/12.2
+export CUDA_HOME=$TACC_CUDA_DIR
+export CUDA_PATH=$TACC_CUDA_DIR
 
 # Change to repo directory so Python imports resolve
 # If SLURM_SUBMIT_DIR isn't set (interactive test), default to current dir
