@@ -105,6 +105,35 @@ def fps_gather(points: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
     return torch.gather(points, 1, idx)
 
 
+def test_fps(input_path: str, n_samples_list: list[int], output_dir_base: str = "results/fps") -> None:
+    """
+    Test farthest_point_sample on a numpy file, outputting
+    FPS-downsampled clouds.
+    """
+    import os
+    import numpy as np
+
+    file_name = os.path.basename(input_path)
+    base_name = os.path.splitext(file_name)[0]
+    
+    output_dir = os.path.join(output_dir_base, base_name)
+    os.makedirs(output_dir, exist_ok=True)
+
+    raw = np.load(input_path)          # expected shape: [N, 3]
+    print(f"Loaded {input_path}  shape={raw.shape}")
+
+    # farthest_point_sample expects [B, N, 3]
+    pts = torch.from_numpy(raw).float().unsqueeze(0)   # [1, N, 3]
+
+    for n_samples in n_samples_list:
+        out_path = os.path.join(output_dir, f"{n_samples}.npy")
+        idx      = farthest_point_sample(pts, n_samples)          # [1, n_samples]
+        sampled  = fps_gather(pts, idx)                           # [1, n_samples, 3]
+        result   = sampled.squeeze(0).numpy()                     # [n_samples, 3]
+        np.save(out_path, result)
+        print(f"Saved {n_samples}-point cloud → {out_path}  shape={result.shape}")
+
+
 # ---------------------------------------------------------------------------
 # K-Nearest Neighbours
 # ---------------------------------------------------------------------------
@@ -195,3 +224,14 @@ def knn_gather_vn(
     flat = features.reshape(B, M, three * C)
     gathered_flat = knn_gather(flat, knn_idx)                    # [B, N, K, 3*C]
     return gathered_flat.reshape(B, N, K, three, C)
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Test FPS")
+    parser.add_argument("input_path", type=str, help="Path to input .npy file")
+    parser.add_argument("--n_samples", type=int, nargs='+', default=[1024, 2048], help="List of target point counts (e.g., 512 1024 2048)")
+    parser.add_argument("--output_dir", type=str, default="results/fps", help="Directory to save the outputs")
+    args = parser.parse_args()
+
+    test_fps(args.input_path, args.n_samples, args.output_dir)
