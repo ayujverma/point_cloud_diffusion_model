@@ -4,7 +4,9 @@ Full-Resolution Inference Script — Flow All 15k Points
 
 This script loads a trained checkpoint and flows the **full-resolution**
 canonical template (e.g. 15 000 points) through the learned velocity field
-to reach each target shape.
+to reach each target shape.  The resulting flowed point clouds form the
+**aligned test set**: point index k in every output refers to the same
+semantic body part, because all outputs originate from the same template.
 
 Why this works without retraining
 ---------------------------------
@@ -29,10 +31,10 @@ Usage
 
 Outputs
 -------
-- ``{output_dir}/flowed_{idx:04d}.npy``  — flowed point cloud  [N_template, 3]
-- ``{output_dir}/target_{idx:04d}.npy``  — original target      [M, 3]
-- ``{output_dir}/template.npy``          — canonical template    [N_template, 3]
-- ``{output_dir}/summary.txt``           — per-shape Chamfer distance
+- ``{output_dir}/flowed_{idx:04d}.npy``  — aligned point cloud   [N_template, 3]
+- ``{output_dir}/target_{idx:04d}.npy``  — original target        [M, 3]
+- ``{output_dir}/template.npy``          — canonical template      [N_template, 3]
+- ``{output_dir}/summary.txt``           — per-shape Chamfer distances (before & after)
 """
 
 from __future__ import annotations
@@ -154,12 +156,14 @@ def main():
     n_samples = len(dataset) if args.max_samples < 0 else min(args.max_samples, len(dataset))
 
     # ---- Save the canonical template ----
-    template_np = model.get_template(1).squeeze(0).detach().cpu().numpy()  # [N_tmpl, 3]
+    template = model.get_template(1).squeeze(0)                  # [N_tmpl, 3]
+    template_np = template.detach().cpu().numpy()
     np.save(os.path.join(args.output_dir, "template.npy"), template_np)
     print(f"  Template saved: {template_np.shape}")
 
     # ---- Process each test shape ----
-    chamfer_dists = []
+    chamfer_before = []   # template (no flow) vs target
+    chamfer_after = []    # flowed template vs target
     total_time = 0.0
 
     for idx in range(n_samples):
@@ -168,15 +172,16 @@ def main():
 
         print(f"\n  [{idx+1}/{n_samples}] Target: {M} points")
 
+        # "Before" metric: Chamfer distance from raw template to target
+        cd_before = chamfer_distance(template, target_full).item()
+        chamfer_before.append(cd_before)
+
         # Encode needs [B, M, 3]
         target_batch = target_full.unsqueeze(0)                  # [1, M, 3]
 
         t0 = time.time()
 
         with torch.no_grad():
-            # Flow the FULL template (all 15k points) using the learned field
-            # The encoder processes the target to get z, then the decoder
-            # velocity field is evaluated on each template point.
             trajectory = flow_matcher.sample(
                 target_batch,
                 n_steps=args.n_steps,
@@ -189,11 +194,13 @@ def main():
         elapsed = time.time() - t0
         total_time += elapsed
 
-        # Chamfer distance between flowed template and target
-        cd = chamfer_distance(flowed, target_full).item()
-        chamfer_dists.append(cd)
+        # "After" metric: Chamfer distance from flowed template to target
+        cd_after = chamfer_distance(flowed, target_full).item()
+        chamfer_after.append(cd_after)
 
-        print(f"    Chamfer: {cd:.6f}  |  Time: {elapsed:.2f}s")
+        improvement = (1 - cd_after / max(cd_before, 1e-8)) * 100
+        print(f"    CD before: {cd_before:.6f}  |  CD after: {cd_after:.6f}  "
+              f"|  Improvement: {improvement:.1f}%  |  Time: {elapsed:.2f}s")
 
         # Save results
         flowed_np = flowed.cpu().numpy()
@@ -202,31 +209,41 @@ def main():
         np.save(os.path.join(args.output_dir, f"target_{idx:04d}.npy"), target_np)
 
     # ---- Summary ----
-    mean_cd = np.mean(chamfer_dists) if chamfer_dists else 0.0
-    std_cd = np.std(chamfer_dists) if chamfer_dists else 0.0
+    mean_before = np.mean(chamfer_before) if chamfer_before else 0.0
+    std_before = np.std(chamfer_before) if chamfer_before else 0.0
+    mean_after = np.mean(chamfer_after) if chamfer_after else 0.0
+    std_after = np.std(chamfer_after) if chamfer_after else 0.0
+    mean_improvement = (1 - mean_after / max(mean_before, 1e-8)) * 100
 
     summary = (
         f"Full-Resolution Inference Summary\n"
-        f"{'=' * 40}\n"
-        f"Checkpoint:    {args.checkpoint}\n"
-        f"Split:         {args.split}\n"
-        f"Num shapes:    {n_samples}\n"
-        f"Template pts:  {args.n_points}\n"
-        f"KNN-k:         {args.knn_k}\n"
-        f"Steps:         {args.n_steps}\n"
-        f"Method:        {args.method}\n"
-        f"{'=' * 40}\n"
-        f"Mean Chamfer:  {mean_cd:.6f} ± {std_cd:.6f}\n"
-        f"Total time:    {total_time:.1f}s\n"
-        f"Avg time/shape:{total_time / max(n_samples, 1):.2f}s\n"
+        f"{'=' * 50}\n"
+        f"Checkpoint:       {args.checkpoint}\n"
+        f"Split:            {args.split}\n"
+        f"Num shapes:       {n_samples}\n"
+        f"Template pts:     {args.n_points}\n"
+        f"KNN-k:            {args.knn_k}\n"
+        f"Steps:            {args.n_steps}\n"
+        f"Method:           {args.method}\n"
+        f"{'=' * 50}\n"
+        f"Chamfer BEFORE (template vs target):\n"
+        f"  Mean:  {mean_before:.6f} +/- {std_before:.6f}\n"
+        f"Chamfer AFTER  (flowed vs target):\n"
+        f"  Mean:  {mean_after:.6f} +/- {std_after:.6f}\n"
+        f"Improvement:      {mean_improvement:.1f}%\n"
+        f"{'=' * 50}\n"
+        f"Total time:       {total_time:.1f}s\n"
+        f"Avg time/shape:   {total_time / max(n_samples, 1):.2f}s\n"
     )
     print(f"\n{summary}")
 
     with open(os.path.join(args.output_dir, "summary.txt"), "w") as f:
         f.write(summary)
-        f.write("\nPer-shape Chamfer distances:\n")
-        for i, cd in enumerate(chamfer_dists):
-            f.write(f"  {i:4d}: {cd:.6f}\n")
+        f.write("\nPer-shape Chamfer distances (before → after):\n")
+        for i in range(len(chamfer_after)):
+            imp = (1 - chamfer_after[i] / max(chamfer_before[i], 1e-8)) * 100
+            f.write(f"  {i:4d}: {chamfer_before[i]:.6f} → {chamfer_after[i]:.6f}  "
+                    f"({imp:+.1f}%)\n")
 
     print(f"Results saved to {args.output_dir}/")
 
