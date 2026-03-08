@@ -33,8 +33,8 @@ export CUDA_HOME=$TACC_CUDA_DIR
 export CUDA_PATH=$TACC_CUDA_DIR
 
 # Change to repo directory
-SLURM_SUBMIT_DIR="/work/10692/ayuj/point_cloud_diffusion_model"
-cd "${SLURM_SUBMIT_DIR}"
+REPO_DIR="/work/10692/ayuj/point_cloud_diffusion_model"
+cd "${REPO_DIR}"
 
 echo "=========================================="
 echo " TRAINING — Rectified Flow Point Cloud"
@@ -79,7 +79,7 @@ echo "=========================================="
 
 # ---- Stage data to local scratch for fast I/O ----
 LOCAL_SCRATCH="/tmp/${USER}/human_pc15k"
-DATA_ROOT="${SLURM_SUBMIT_DIR}/data/human"
+DATA_ROOT="${REPO_DIR}/data/human"
 
 echo "Staging data to $LOCAL_SCRATCH ..."
 if [ ! -d "$LOCAL_SCRATCH/train" ]; then
@@ -91,8 +91,8 @@ fi
 echo "Data staging complete."
 
 # ---- Create directories ----
-CKPT_DIR="${SLURM_SUBMIT_DIR}/checkpoints/${SLURM_JOB_ID}"
-LOGS_DIR="${SLURM_SUBMIT_DIR}/logs/${SLURM_JOB_ID}"
+CKPT_DIR="${REPO_DIR}/checkpoints/${SLURM_JOB_ID}"
+LOGS_DIR="${REPO_DIR}/logs/${SLURM_JOB_ID}"
 mkdir -p "${CKPT_DIR}"
 mkdir -p "${LOGS_DIR}"
 
@@ -113,7 +113,7 @@ torchrun \
     --node_rank=0 \
     --master_addr=localhost \
     --master_port=29500 \
-    ${SLURM_SUBMIT_DIR}/train.py \
+    ${REPO_DIR}/train.py \
         --data_root ${LOCAL_SCRATCH} \
         --n_points ${N_POINTS} \
         --train_n_points ${TRAIN_N_POINTS} \
