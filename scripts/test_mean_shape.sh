@@ -13,8 +13,12 @@
 # to 2048 points via FPS, aligned with Hungarian OT, and averaged.
 #===========================================================================
 
-DATA_ROOT="data/human"
-OUTPUT_DIR="results/mean_shape"
+# Change to repo directory
+REPO_DIR="/work/10692/ayuj/point_cloud_diffusion_model"
+cd "${REPO_DIR}"
+
+DATA_ROOT="$REPO_DIR/data/human"
+OUTPUT_DIR="$REPO_DIR/results/mean_shape"
 OUTPUT_FILE="${OUTPUT_DIR}/mean_shape_test.npy"
 N_POINTS=2048
 MAX_SHAPES=5
