@@ -46,8 +46,8 @@ echo "=========================================="
 NGPUS_PER_NODE=4
 
 # ---- Hyperparameters ----
-N_POINTS=15000          # Full resolution loaded from disk
-TRAIN_N_POINTS=2048     # FPS subsample during training; fits comfortably in 96GB
+N_POINTS=2048           # Template + data resolution (matches inference)
+TRAIN_N_POINTS=0        # 0 = no FPS subsampling (already at target resolution)
 KNN_K=32                # KNN neighbours for local attention (0 = global)
 CHANNELS=128            # VN channel width
 N_HEADS=8               # Attention heads
@@ -60,18 +60,31 @@ EPOCHS=1500             # Fits smoothly within hours limit on 4 H100s
 WARMUP=20               # Warmup epochs (scaled slightly up for larger batch)
 GRAD_CLIP=1.0           # Max gradient norm
 SAVE_EVERY=100          # Checkpoint every N epochs
-VAL_EVERY=50            # Validation every N epochs
+VAL_EVERY=50            # Validation + visualization every N epochs
 WANDB_PROJECT="dense-3d-point-correspondences"
 WANDB_ENTITY="dense-3d-point-correspondences"
 
+# ---- Surface / OT loss hyperparameters ----
+LAMBDA_OT=0.1           # Sinkhorn divergence weight
+LAMBDA_REG=0.001        # Template regularisation (10x lower than before — let it deform!)
+LAMBDA_CHAMFER=0.1      # Chamfer loss on extrapolated endpoint
+LAMBDA_REPULSION=0.01   # Local density uniformity
+SINKHORN_ITERS=100      # Assignment matrix iterations
+SINKHORN_REG=0.01       # Entropic regularisation (sharp assignment)
+TEMPLATE_REG_RADIUS=2.0 # Norms below this not penalised (relaxed from 1.5)
+LAMBDA_REG_DECAY=0.995  # Gradual template freedom: lambda_reg *= 0.995 each epoch
+
 echo ""
-echo " N_POINTS:       $N_POINTS (loaded from disk)"
-echo " TRAIN_N_POINTS: $TRAIN_N_POINTS (FPS subsample for training)"
+echo " N_POINTS:       $N_POINTS (template + data resolution)"
+echo " TRAIN_N_POINTS: $TRAIN_N_POINTS (0 = disabled, already at target res)"
 echo " KNN_K:          $KNN_K"
 echo " BATCH_SIZE:     $BATCH_SIZE (per GPU, effective = $(( BATCH_SIZE * NGPUS_PER_NODE )))"
 echo " LR:             $LR (linear scaled for effective batch $(( BATCH_SIZE * NGPUS_PER_NODE )))"
 echo " EPOCHS:         $EPOCHS"
 echo " WARMUP:         $WARMUP epochs"
+echo " LAMBDA_REG:     $LAMBDA_REG (with decay $LAMBDA_REG_DECAY per epoch)"
+echo " LAMBDA_CHAMFER: $LAMBDA_CHAMFER"
+echo " LAMBDA_REPULSION: $LAMBDA_REPULSION"
 echo "=========================================="
 
 # ---- Stage data to local scratch for fast I/O ----
@@ -94,11 +107,35 @@ LOGS_DIR="${REPO_DIR}/logs/${SLURM_JOB_ID}"
 mkdir -p "${CKPT_DIR}"
 mkdir -p "${LOGS_DIR}"
 
-# ------------------------------
-# Activate conda environment
-# ------------------------------
-source /work/10692/ayuj/miniconda3/etc/profile.d/conda.sh
-conda activate rectflow
+# ---- Compute mean shape for template initialization ----
+# This gives the Sinkhorn alignment a massive head start vs. a Fibonacci sphere.
+MEAN_SHAPE="${REPO_DIR}/data/mean_shape_2048.npy"
+
+if [ ! -f "$MEAN_SHAPE" ]; then
+    echo ""
+    echo "=========================================="
+    echo " Computing mean training shape..."
+    echo " (This runs once, ~10-30 minutes)"
+    echo "=========================================="
+
+    # Activate conda first for this step
+    source /work/10692/ayuj/miniconda3/etc/profile.d/conda.sh
+    conda activate rectflow
+
+    python ${REPO_DIR}/compute_mean_shape.py \
+        --data_root ${LOCAL_SCRATCH} \
+        --n_points ${N_POINTS} \
+        --output ${MEAN_SHAPE} \
+        --hungarian_limit 4096
+
+    echo "Mean shape computed: $MEAN_SHAPE"
+else
+    echo "Mean shape already exists: $MEAN_SHAPE"
+    # Still need to activate conda
+    source /work/10692/ayuj/miniconda3/etc/profile.d/conda.sh
+    conda activate rectflow
+fi
+
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
@@ -132,6 +169,16 @@ torchrun \
         --ckpt_dir ${CKPT_DIR} \
         --save_every ${SAVE_EVERY} \
         --val_every ${VAL_EVERY} \
+        --template_init ${MEAN_SHAPE} \
+        --lambda_ot ${LAMBDA_OT} \
+        --lambda_reg ${LAMBDA_REG} \
+        --lambda_chamfer ${LAMBDA_CHAMFER} \
+        --lambda_repulsion ${LAMBDA_REPULSION} \
+        --sinkhorn_iters ${SINKHORN_ITERS} \
+        --sinkhorn_reg ${SINKHORN_REG} \
+        --template_reg_radius ${TEMPLATE_REG_RADIUS} \
+        --lambda_reg_decay ${LAMBDA_REG_DECAY} \
+        --use_hard_assignment \
         --amp
 
 echo "Training job $SLURM_JOB_ID finished."

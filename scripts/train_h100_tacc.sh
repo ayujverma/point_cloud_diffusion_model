@@ -50,8 +50,8 @@ echo "=========================================="
 NGPUS_PER_NODE=2
 
 # ---- Hyperparameters ----
-N_POINTS=15000          # Full resolution loaded from disk
-TRAIN_N_POINTS=1024     # FPS subsample during training (15k → 1024); fits in 80 GB
+N_POINTS=1024           # Template + data resolution (matches inference)
+TRAIN_N_POINTS=0        # 0 = no FPS subsampling (already at target resolution)
 KNN_K=32                # KNN neighbours for local attention (0 = global)
 CHANNELS=128            # VN channel width
 N_HEADS=8               # Attention heads
@@ -63,14 +63,24 @@ LR=1e-4                 # Linear scaling: base 1e-4 × (32 effective / 32 base) 
 EPOCHS=1500             # ~37-40h on 2 H100s (~90s/epoch), fits in 48h
 WARMUP=15               # Warmup epochs (ramp LR from 0 → 2e-4 over 15 epochs)
 GRAD_CLIP=1.0           # Max gradient norm
-SAVE_EVERY=100           # Checkpoint every N epochs
-VAL_EVERY=50           # Validation every N epochs
+SAVE_EVERY=100          # Checkpoint every N epochs
+VAL_EVERY=50            # Validation + visualization every N epochs
 WANDB_PROJECT="dense-3d-point-correspondences"
 WANDB_ENTITY="dense-3d-point-correspondences"
 
+# ---- Surface / OT loss hyperparameters ----
+LAMBDA_OT=0.1
+LAMBDA_REG=0.001
+LAMBDA_CHAMFER=0.1
+LAMBDA_REPULSION=0.01
+SINKHORN_ITERS=100
+SINKHORN_REG=0.01
+TEMPLATE_REG_RADIUS=2.0
+LAMBDA_REG_DECAY=0.995
+
 echo ""
-echo " N_POINTS:       $N_POINTS (loaded from disk)"
-echo " TRAIN_N_POINTS: $TRAIN_N_POINTS (FPS subsample for training)"
+echo " N_POINTS:       $N_POINTS (template + data resolution)"
+echo " TRAIN_N_POINTS: $TRAIN_N_POINTS (0 = disabled, already at target res)"
 echo " KNN_K:          $KNN_K"
 echo " BATCH_SIZE:     $BATCH_SIZE (per GPU, effective = $(( BATCH_SIZE * NGPUS_PER_NODE )))"
 echo " LR:             $LR (linear scaled for effective batch $(( BATCH_SIZE * NGPUS_PER_NODE )))"
@@ -97,11 +107,26 @@ LOGS_DIR="${REPO_DIR}/logs/${SLURM_JOB_ID}"
 mkdir -p "${CKPT_DIR}"
 mkdir -p "${LOGS_DIR}"
 
-# ------------------------------
-# Activate conda environment
-# ------------------------------
-source /work/10692/ayuj/miniconda3/etc/profile.d/conda.sh
-conda activate rectflow
+# ---- Compute mean shape for template initialization ----
+MEAN_SHAPE="${REPO_DIR}/data/mean_shape_2048.npy"
+
+if [ ! -f "$MEAN_SHAPE" ]; then
+    echo ""
+    echo "Computing mean training shape..."
+    source /work/10692/ayuj/miniconda3/etc/profile.d/conda.sh
+    conda activate rectflow
+    python ${REPO_DIR}/compute_mean_shape.py \
+        --data_root ${LOCAL_SCRATCH} \
+        --n_points ${N_POINTS} \
+        --output ${MEAN_SHAPE} \
+        --hungarian_limit 4096
+    echo "Mean shape computed: $MEAN_SHAPE"
+else
+    echo "Mean shape already exists: $MEAN_SHAPE"
+    source /work/10692/ayuj/miniconda3/etc/profile.d/conda.sh
+    conda activate rectflow
+fi
+
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
@@ -135,6 +160,16 @@ torchrun \
         --ckpt_dir ${CKPT_DIR} \
         --save_every ${SAVE_EVERY} \
         --val_every ${VAL_EVERY} \
+        --template_init ${MEAN_SHAPE} \
+        --lambda_ot ${LAMBDA_OT} \
+        --lambda_reg ${LAMBDA_REG} \
+        --lambda_chamfer ${LAMBDA_CHAMFER} \
+        --lambda_repulsion ${LAMBDA_REPULSION} \
+        --sinkhorn_iters ${SINKHORN_ITERS} \
+        --sinkhorn_reg ${SINKHORN_REG} \
+        --template_reg_radius ${TEMPLATE_REG_RADIUS} \
+        --lambda_reg_decay ${LAMBDA_REG_DECAY} \
+        --use_hard_assignment \
         --amp
 
 echo "Training job $SLURM_JOB_ID finished."

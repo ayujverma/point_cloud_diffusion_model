@@ -8,7 +8,7 @@
 #
 # Before submitting, edit the SBATCH lines below to match your queue:
 #   - Stampede3 H100:  -p h100       -A ASC26027
-#   - Vista H100:      -p gpu-h100   -A CCR25016
+#   - Lonestar6 H100:      -p gpu-h100   -A CCR25016
 #   - Lonestar6 A100:  -p gpu-a100   -A CCR25016
 #
 # Submit with:  sbatch scripts/test_tacc.sh
@@ -53,7 +53,7 @@ SPLIT="test"
 OUTPUT_DIR="${REPO_DIR}/results/model_${TRAIN_JOB_ID}/test_${SLURM_JOB_ID}"
 
 # Model architecture (must match training)
-N_POINTS=15000
+N_POINTS=2048
 CHANNELS=128
 N_HEADS=8
 ENC_DEPTH=6
@@ -148,8 +148,9 @@ python ${REPO_DIR}/visualize.py \
     --checkpoint ${CHECKPOINT} \
     --data_root ${LOCAL_SCRATCH} \
     --n_targets 10 \
-    --n_steps ${N_STEPS} \
+    --n_steps 30 \
     --n_points ${N_POINTS} \
+    --vis_n_points 2048 \
     --channels ${CHANNELS} \
     --n_heads ${N_HEADS} \
     --enc_depth ${ENC_DEPTH} \
