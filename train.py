@@ -53,7 +53,7 @@ def parse_args() -> argparse.Namespace:
     # --- Data ---
     p.add_argument("--data_root", type=str, default="data/human",
                    help="Path to dataset root containing train/val/test folders.")
-    p.add_argument("--n_points", type=int, default=15000,
+    p.add_argument("--n_points", type=int, default=2048,
                    help="Number of points loaded per cloud from disk (full resolution).")
     p.add_argument("--train_n_points", type=int, default=2048,
                    help="FPS subsample size during training. Set to 0 to disable "

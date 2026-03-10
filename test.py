@@ -103,7 +103,7 @@ def main():
                         help="Max number of test shapes to process (-1 = all)")
 
     # Model architecture (must match checkpoint)
-    parser.add_argument("--n_points", type=int, default=15000,
+    parser.add_argument("--n_points", type=int, default=2048,
                         help="Full template resolution (must match training)")
     parser.add_argument("--channels", type=int, default=128)
     parser.add_argument("--n_heads", type=int, default=8)

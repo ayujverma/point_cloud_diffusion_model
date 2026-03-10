@@ -467,7 +467,7 @@ class FlowTransformer(nn.Module):
 
     Parameters
     ----------
-    n_points       : int   — full-resolution template size (e.g. 15000)
+    n_points       : int   — full-resolution template size (e.g. 2048)
     channels       : int   — VN channel width
     n_heads        : int   — attention heads
     enc_depth      : int   — encoder depth

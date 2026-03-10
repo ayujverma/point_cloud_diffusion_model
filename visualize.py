@@ -269,7 +269,10 @@ def main():
                         help="Number of target shapes to visualise")
     parser.add_argument("--n_steps", type=int, default=30,
                         help="ODE integration steps")
-    parser.add_argument("--n_points", type=int, default=2048)
+    parser.add_argument("--n_points", type=int, default=2048,
+                        help="Model template resolution (must match checkpoint)")
+    parser.add_argument("--vis_n_points", type=int, default=2048,
+                        help="Number of points for rendering (subsampled for speed)")
     parser.add_argument("--output_dir", type=str, default="visualisations")
     parser.add_argument("--device", type=str, default="cuda")
 
@@ -306,7 +309,10 @@ def main():
 
     flow_matcher = RectifiedFlowMatcher(model=model).to(device)
 
-    # ---- Load test data ----
+    vis_n = args.vis_n_points
+    print(f"  Model resolution: {args.n_points}  |  Rendering resolution: {vis_n}")
+
+    # ---- Load test data (at vis resolution for speed) ----
     test_dir = os.path.join(args.data_root, "test")
     if not os.path.isdir(test_dir):
         for fallback in ["val", "train"]:
@@ -314,15 +320,24 @@ def main():
             if os.path.isdir(test_dir):
                 break
 
-    dataset = PointCloudDataset(test_dir, n_points=args.n_points, normalise=True)
+    dataset = PointCloudDataset(test_dir, n_points=vis_n, normalise=True)
     n_targets = min(args.n_targets, len(dataset))
 
     # Select evenly-spaced samples
     indices = np.linspace(0, len(dataset) - 1, n_targets, dtype=int)
-    targets = torch.stack([dataset[i] for i in indices]).to(device)  # [K, N, 3]
+    targets = torch.stack([dataset[i] for i in indices]).to(device)  # [K, vis_n, 3]
 
     # ---- Get template + colours ----
-    template = model.get_template(1).squeeze(0).detach().cpu().numpy()  # [N, 3]
+    # flow_matcher.sample with use_full_template=False auto-subsamples the
+    # 15k template to match the target size (vis_n) via FPS.
+    # For colour assignment, subsample the full template the same way so
+    # colours are consistent.
+    with torch.no_grad():
+        full_tmpl = model.get_template(1)                        # [1, 15k, 3]
+        from core.point_ops import farthest_point_sample, fps_gather
+        fps_idx = farthest_point_sample(full_tmpl, vis_n)        # [1, vis_n]
+        tmpl_sub = fps_gather(full_tmpl, fps_idx).squeeze(0)     # [vis_n, 3]
+    template = tmpl_sub.cpu().numpy()
     colours = assign_template_colours(template)
 
     # ---- Integrate flow for each target ----
@@ -331,9 +346,10 @@ def main():
     all_trajectories = []
 
     for i in range(n_targets):
-        target_i = targets[i : i + 1]                            # [1, N, 3]
+        target_i = targets[i : i + 1]                            # [1, vis_n, 3]
+        # use_full_template=False → FPS-subsample template to vis_n points
         traj = flow_matcher.sample(target_i, n_steps=args.n_steps, method="midpoint")
-        traj_np = traj[:, 0].cpu().numpy()                       # [S+1, N, 3]
+        traj_np = traj[:, 0].cpu().numpy()                       # [S+1, vis_n, 3]
         all_trajectories.append(traj_np)
         all_flowed.append(traj_np[-1])                           # final frame
 
