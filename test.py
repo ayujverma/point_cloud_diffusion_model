@@ -1,23 +1,12 @@
 """
-Full-Resolution Inference Script — Flow All 15k Points
-=======================================================
+Inference Script — Flow 2048-point Template to Target
+=====================================================
 
-This script loads a trained checkpoint and flows the **full-resolution**
-canonical template (e.g. 15 000 points) through the learned velocity field
-to reach each target shape.  The resulting flowed point clouds form the
-**aligned test set**: point index k in every output refers to the same
-semantic body part, because all outputs originate from the same template.
-
-Why this works without retraining
----------------------------------
-The velocity network ``v_θ(x_t, t; z)`` is a *point-wise* function:
-it takes each point's position x_t and produces a velocity vector.  The
-only inter-point interaction is through KNN-local attention, which is
-O(N·K) in memory.  Since the model was trained on 2 048-point subsamples
-of the same shapes, the velocity field has learned the correct *spatial*
-mapping.  At test time we simply evaluate it on a denser grid (all 15k
-template points), and each point follows the learned flow to land on the
-target surface.
+This script loads a trained checkpoint and flows the canonical template
+(2048 points) through the learned velocity field to reach each target
+shape.  The resulting flowed point clouds form the **aligned set**: point
+index k in every output refers to the same semantic location, because all
+outputs originate from the same template.
 
 Usage
 -----
@@ -27,14 +16,14 @@ Usage
         --checkpoint checkpoints/best.pt \\
         --data_root data/human \\
         --n_steps 50 \\
-        --output_dir results/full_res
+        --output_dir results/test
 
 Outputs
 -------
-- ``{output_dir}/flowed_{idx:04d}.npy``  — aligned point cloud   [N_template, 3]
-- ``{output_dir}/target_{idx:04d}.npy``  — original target        [M, 3]
-- ``{output_dir}/template.npy``          — canonical template      [N_template, 3]
-- ``{output_dir}/summary.txt``           — per-shape Chamfer distances (before & after)
+- ``{output_dir}/flowed_{idx:04d}.npy``  — aligned point cloud   [2048, 3]
+- ``{output_dir}/target_{idx:04d}.npy``  — FPS-subsampled target  [2048, 3]
+- ``{output_dir}/template.npy``          — canonical template      [2048, 3]
+- ``{output_dir}/summary.txt``           — per-shape Chamfer distances
 """
 
 from __future__ import annotations
@@ -53,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from models.vn_transformer import FlowTransformer
 from core.flow_matcher import RectifiedFlowMatcher
 from core.dataset import PointCloudDataset
+from core.point_ops import farthest_point_sample, fps_gather
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +74,7 @@ def chamfer_distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Full-resolution inference: flow 15k template → target"
+        description="Inference: flow 2048-point template → target"
     )
     parser.add_argument("--checkpoint", type=str, required=True,
                         help="Path to model checkpoint (.pt)")
@@ -97,14 +87,14 @@ def main():
     parser.add_argument("--method", type=str, default="midpoint",
                         choices=["euler", "midpoint"],
                         help="Integration method")
-    parser.add_argument("--output_dir", type=str, default="results/full_res")
+    parser.add_argument("--output_dir", type=str, default="results/test")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--max_samples", type=int, default=-1,
                         help="Max number of test shapes to process (-1 = all)")
 
     # Model architecture (must match checkpoint)
     parser.add_argument("--n_points", type=int, default=2048,
-                        help="Full template resolution (must match training)")
+                        help="Template resolution (must match training)")
     parser.add_argument("--channels", type=int, default=128)
     parser.add_argument("--n_heads", type=int, default=8)
     parser.add_argument("--enc_depth", type=int, default=6)
@@ -119,7 +109,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     print("=" * 70)
-    print("  Full-Resolution Inference — Rectified Flow")
+    print("  Inference — Rectified Flow (2048 points)")
     print(f"  Template points: {args.n_points}")
     print(f"  KNN-k: {args.knn_k}  |  Steps: {args.n_steps}  |  Method: {args.method}")
     print(f"  Device: {device}")
@@ -145,13 +135,13 @@ def main():
 
     flow_matcher = RectifiedFlowMatcher(model=model).to(device)
 
-    # ---- Load test data (full resolution) ----
+    # ---- Load test data (full resolution — we'll FPS to 2048) ----
     split_dir = os.path.join(args.data_root, args.split)
     if not os.path.isdir(split_dir):
         print(f"Error: {split_dir} does not exist.")
         sys.exit(1)
 
-    # Load at full resolution (n_points=-1 returns all raw points)
+    # Load at full resolution, FPS to n_points for each sample
     dataset = PointCloudDataset(split_dir, n_points=-1, normalise=True)
     n_samples = len(dataset) if args.max_samples < 0 else min(args.max_samples, len(dataset))
 
@@ -170,23 +160,28 @@ def main():
         target_full = dataset[idx].to(device)                    # [M, 3]
         M = target_full.shape[0]
 
-        print(f"\n  [{idx+1}/{n_samples}] Target: {M} points")
+        # FPS to n_points (2048)
+        target_batch = target_full.unsqueeze(0)                  # [1, M, 3]
+        if M > args.n_points:
+            fps_idx = farthest_point_sample(target_batch, args.n_points)
+            target_sub = fps_gather(target_batch, fps_idx)       # [1, 2048, 3]
+        else:
+            target_sub = target_batch
+        target_2048 = target_sub.squeeze(0)                      # [2048, 3]
+
+        print(f"\n  [{idx+1}/{n_samples}] Target: {M} pts → FPS → {target_2048.shape[0]} pts")
 
         # "Before" metric: Chamfer distance from raw template to target
-        cd_before = chamfer_distance(template, target_full).item()
+        cd_before = chamfer_distance(template, target_2048).item()
         chamfer_before.append(cd_before)
-
-        # Encode needs [B, M, 3]
-        target_batch = target_full.unsqueeze(0)                  # [1, M, 3]
 
         t0 = time.time()
 
         with torch.no_grad():
             trajectory = flow_matcher.sample(
-                target_batch,
+                target_sub,
                 n_steps=args.n_steps,
                 method=args.method,
-                use_full_template=True,
             )
             # trajectory: [n_steps+1, 1, N_tmpl, 3]
             flowed = trajectory[-1, 0]                           # [N_tmpl, 3]
@@ -195,7 +190,7 @@ def main():
         total_time += elapsed
 
         # "After" metric: Chamfer distance from flowed template to target
-        cd_after = chamfer_distance(flowed, target_full).item()
+        cd_after = chamfer_distance(flowed, target_2048).item()
         chamfer_after.append(cd_after)
 
         improvement = (1 - cd_after / max(cd_before, 1e-8)) * 100
@@ -204,7 +199,7 @@ def main():
 
         # Save results
         flowed_np = flowed.cpu().numpy()
-        target_np = target_full.cpu().numpy()
+        target_np = target_2048.cpu().numpy()
         np.save(os.path.join(args.output_dir, f"flowed_{idx:04d}.npy"), flowed_np)
         np.save(os.path.join(args.output_dir, f"target_{idx:04d}.npy"), target_np)
 
@@ -216,7 +211,7 @@ def main():
     mean_improvement = (1 - mean_after / max(mean_before, 1e-8)) * 100
 
     summary = (
-        f"Full-Resolution Inference Summary\n"
+        f"Inference Summary (2048 points)\n"
         f"{'=' * 50}\n"
         f"Checkpoint:       {args.checkpoint}\n"
         f"Split:            {args.split}\n"
