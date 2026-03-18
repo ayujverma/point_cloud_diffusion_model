@@ -7,6 +7,8 @@
 # 5000 training samples  ×  1 node  ×  4 H100 SXM5 GPUs (96 GB each)
 # Effective batch = 16 × 4 = 64  →  ~79 steps/epoch  →  ~118k updates total
 #
+# Loads full 15k-point clouds; FPS subsamples to 2048 in dataset.
+#
 # Submit with:  sbatch scripts/train_s3_h100_tacc.sh
 #===========================================================================
 
@@ -46,45 +48,43 @@ echo "=========================================="
 NGPUS_PER_NODE=4
 
 # ---- Hyperparameters ----
-N_POINTS=2048           # Template + data resolution (matches inference)
-TRAIN_N_POINTS=0        # 0 = no FPS subsampling (already at target resolution)
+N_POINTS=2048           # Template size and inference resolution
+TRAIN_N_POINTS=2048     # FPS subsample size (dataset loads full 15k, FPS in __getitem__)
 KNN_K=32                # KNN neighbours for local attention (0 = global)
 CHANNELS=128            # VN channel width
 N_HEADS=8               # Attention heads
 ENC_DEPTH=6             # Encoder transformer blocks
 DEC_DEPTH=6             # Decoder transformer blocks
 LATENT_DIM=256          # Shape latent z dimension
-BATCH_SIZE=16           # Per-GPU batch size (effective = 16 × 4 = 64); backed down from 32 to avoid OOM
+BATCH_SIZE=16           # Per-GPU batch size (effective = 16 × 4 = 64)
 LR=2e-4                 # Linear scaling: base 1e-4 × (64 effective / 32 base) = 2e-4
 EPOCHS=1500             # Fits smoothly within hours limit on 4 H100s
-WARMUP=20               # Warmup epochs (scaled slightly up for larger batch)
+WARMUP=20               # Warmup epochs
 GRAD_CLIP=1.0           # Max gradient norm
 SAVE_EVERY=100          # Checkpoint every N epochs
-VAL_EVERY=50            # Validation + visualization every N epochs
+VAL_EVERY=50            # Validation every N epochs
+VIS_EVERY=50            # Visualization every N epochs
 WANDB_PROJECT="dense-3d-point-correspondences"
 WANDB_ENTITY="dense-3d-point-correspondences"
 
 # ---- Surface / OT loss hyperparameters ----
-LAMBDA_OT=0.1           # Sinkhorn divergence weight
-LAMBDA_REG=0.001        # Template regularisation (10x lower than before — let it deform!)
-LAMBDA_CHAMFER=0.1      # Chamfer loss on extrapolated endpoint
-LAMBDA_REPULSION=0.01   # Local density uniformity
-SINKHORN_ITERS=100      # Assignment matrix iterations
-SINKHORN_REG=0.01       # Entropic regularisation (sharp assignment)
-TEMPLATE_REG_RADIUS=2.0 # Norms below this not penalised (relaxed from 1.5)
-LAMBDA_REG_DECAY=0.995  # Gradual template freedom: lambda_reg *= 0.995 each epoch
+LAMBDA_OT=0.1
+LAMBDA_REG=0.001
+LAMBDA_CHAMFER=0.1
+LAMBDA_REPULSION=0.01
+SINKHORN_ITERS=50
+SINKHORN_REG=0.01
+TEMPLATE_REG_RADIUS=1.5
+LAMBDA_REG_DECAY=0.995
 
 echo ""
-echo " N_POINTS:       $N_POINTS (template + data resolution)"
-echo " TRAIN_N_POINTS: $TRAIN_N_POINTS (0 = disabled, already at target res)"
+echo " N_POINTS:       $N_POINTS (template size)"
+echo " TRAIN_N_POINTS: $TRAIN_N_POINTS (FPS subsample from 15k)"
 echo " KNN_K:          $KNN_K"
 echo " BATCH_SIZE:     $BATCH_SIZE (per GPU, effective = $(( BATCH_SIZE * NGPUS_PER_NODE )))"
-echo " LR:             $LR (linear scaled for effective batch $(( BATCH_SIZE * NGPUS_PER_NODE )))"
+echo " LR:             $LR"
 echo " EPOCHS:         $EPOCHS"
-echo " WARMUP:         $WARMUP epochs"
-echo " LAMBDA_REG:     $LAMBDA_REG (with decay $LAMBDA_REG_DECAY per epoch)"
-echo " LAMBDA_CHAMFER: $LAMBDA_CHAMFER"
-echo " LAMBDA_REPULSION: $LAMBDA_REPULSION"
+echo " VIS_EVERY:      $VIS_EVERY epochs"
 echo "=========================================="
 
 # ---- Stage data to local scratch for fast I/O ----
@@ -103,13 +103,15 @@ echo "Data staging complete."
 
 # ---- Create directories ----
 CKPT_DIR="${REPO_DIR}/checkpoints/${SLURM_JOB_ID}"
+VIS_DIR="${CKPT_DIR}/vis"
 LOGS_DIR="${REPO_DIR}/logs/${SLURM_JOB_ID}"
 mkdir -p "${CKPT_DIR}"
+mkdir -p "${VIS_DIR}"
 mkdir -p "${LOGS_DIR}"
 
 # ---- Compute mean shape for template initialization ----
 # This gives the Sinkhorn alignment a massive head start vs. a Fibonacci sphere.
-MEAN_SHAPE="${REPO_DIR}/data/mean_shape_2048.npy"
+MEAN_SHAPE="${REPO_DIR}/data/mean_shape_${N_POINTS}.npy"
 
 if [ ! -f "$MEAN_SHAPE" ]; then
     echo ""
@@ -125,8 +127,7 @@ if [ ! -f "$MEAN_SHAPE" ]; then
     python ${REPO_DIR}/compute_mean_shape.py \
         --data_root ${LOCAL_SCRATCH} \
         --n_points ${N_POINTS} \
-        --output ${MEAN_SHAPE} \
-        --hungarian_limit 4096
+        --output ${MEAN_SHAPE}
 
     echo "Mean shape computed: $MEAN_SHAPE"
 else
@@ -178,6 +179,8 @@ torchrun \
         --sinkhorn_reg ${SINKHORN_REG} \
         --template_reg_radius ${TEMPLATE_REG_RADIUS} \
         --lambda_reg_decay ${LAMBDA_REG_DECAY} \
+        --vis_every ${VIS_EVERY} \
+        --vis_dir ${VIS_DIR} \
         --use_hard_assignment \
         --amp
 
