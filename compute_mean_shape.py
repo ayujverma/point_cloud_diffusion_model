@@ -1,22 +1,12 @@
 """
-Compute the mean training shape for template initialization.
+Select the most central training shape for template initialization.
 
-This script loads all training point clouds, normalizes each to the unit
-sphere, **aligns them via optimal transport to a reference shape**, and
-averages them to produce a mean shape for template initialization.
+Instead of trying to align and average unordered point clouds (which produces
+blobs when poses vary), we pick the single training shape that has the lowest
+average Chamfer distance to a random subset of other shapes.  This gives us
+a clean, human-shaped template that is geometrically "central" in the dataset.
 
-Why alignment matters
----------------------
-Point clouds are unordered sets — there's no natural pairing between point i
-in shape A and point j in shape B.  Simply sorting by (x,y,z) coordinates
-(lexicographic) blends unrelated body parts when averaging.  Instead, we:
-
-1. Pick a reference shape (the first training sample).
-2. For each other shape, compute the optimal 1-to-1 assignment to the
-   reference via the Hungarian algorithm (exact) or greedy nearest-neighbor
-   (approximate, for large N).
-3. Reorder each shape's points to match the reference ordering.
-4. Average all aligned shapes → proper mean human body.
+The template is a learnable parameter — it just needs a good starting point.
 
 Usage
 -----
@@ -32,8 +22,6 @@ import argparse
 from pathlib import Path
 
 import numpy as np
-from scipy.optimize import linear_sum_assignment
-from scipy.spatial import cKDTree
 
 
 def normalize_to_unit_sphere(pts: np.ndarray) -> np.ndarray:
@@ -61,84 +49,39 @@ def fps_numpy(pts: np.ndarray, n: int) -> np.ndarray:
     return pts[np.array(selected)]
 
 
-def align_hungarian(source: np.ndarray, reference: np.ndarray) -> np.ndarray:
+def chamfer_distance_np(a: np.ndarray, b: np.ndarray) -> float:
     """
-    Align `source` to `reference` via the Hungarian algorithm (exact OT).
-
-    Both inputs must be [N, 3] with the same N.
-    Returns reordered source where source_aligned[i] ↔ reference[i].
-
-    Complexity: O(N^3).  Use for N ≤ ~4096.
+    Bidirectional Chamfer distance (numpy, CPU).
+    a, b: [N, 3]
     """
-    # Pairwise squared distances: [N, N]
-    a_sq = np.sum(source ** 2, axis=1, keepdims=True)       # [N, 1]
-    b_sq = np.sum(reference ** 2, axis=1, keepdims=True).T  # [1, N]
-    ab = source @ reference.T                                # [N, N]
-    cost = np.maximum(a_sq + b_sq - 2 * ab, 0.0)
+    # a→b: for each point in a, squared distance to closest in b
+    # Use chunked computation to avoid huge [N, M] matrices
+    N = a.shape[0]
+    M = b.shape[0]
+    chunk = 512
 
-    # Hungarian: find optimal 1-to-1 assignment minimising total cost
-    row_ind, col_ind = linear_sum_assignment(cost)
+    # a→b
+    min_ab = np.zeros(N)
+    for i in range(0, N, chunk):
+        end = min(i + chunk, N)
+        diff = a[i:end, None, :] - b[None, :, :]  # [chunk, M, 3]
+        dists = np.sum(diff ** 2, axis=-1)          # [chunk, M]
+        min_ab[i:end] = dists.min(axis=1)
 
-    # Reorder: source_aligned[ref_idx] = source[src_idx]
-    source_aligned = np.empty_like(source)
-    source_aligned[row_ind] = source[col_ind]
-    return source_aligned
+    # b→a
+    min_ba = np.zeros(M)
+    for i in range(0, M, chunk):
+        end = min(i + chunk, M)
+        diff = b[i:end, None, :] - a[None, :, :]
+        dists = np.sum(diff ** 2, axis=-1)
+        min_ba[i:end] = dists.min(axis=1)
 
-
-def align_nearest_neighbor(source: np.ndarray, reference: np.ndarray) -> np.ndarray:
-    """
-    Fast approximate alignment using greedy nearest-neighbor with deconfliction.
-
-    For each reference point (processed closest-first), assign the nearest
-    unused source point.  O(N·K) with KD-tree queries where K=10.
-
-    Use for N > ~4096 where Hungarian is too slow.
-    """
-    N = source.shape[0]
-    K = min(20, N)
-
-    # Build KD-tree on source points
-    src_tree = cKDTree(source)
-
-    # For each reference point, query K nearest source neighbours
-    dists, indices = src_tree.query(reference, k=K)
-    if K == 1:
-        dists = dists[:, None]
-        indices = indices[:, None]
-
-    # Greedy assignment: process reference points by closest distance first
-    best_dists = dists[:, 0]
-    order = np.argsort(best_dists)
-
-    used = np.zeros(N, dtype=bool)
-    assignment = np.full(N, -1, dtype=int)
-
-    for ref_idx in order:
-        assigned = False
-        for k in range(K):
-            src_idx = indices[ref_idx, k]
-            if not used[src_idx]:
-                assignment[ref_idx] = src_idx
-                used[src_idx] = True
-                assigned = True
-                break
-        if not assigned:
-            # All K neighbours used — find any nearest unused source point
-            remaining = np.where(~used)[0]
-            if len(remaining) > 0:
-                remaining_dists = np.sum(
-                    (source[remaining] - reference[ref_idx]) ** 2, axis=1
-                )
-                best = remaining[np.argmin(remaining_dists)]
-                assignment[ref_idx] = best
-                used[best] = True
-
-    return source[assignment]
+    return min_ab.mean() + min_ba.mean()
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Compute mean training shape for template initialization."
+        description="Select most central training shape for template initialization."
     )
     parser.add_argument("--data_root", type=str, default="data/human",
                         help="Path to data directory containing train/ folder.")
@@ -147,9 +90,11 @@ def main():
     parser.add_argument("--output", type=str, default="data/mean_shape.npy",
                         help="Output .npy file path.")
     parser.add_argument("--max_shapes", type=int, default=-1,
-                        help="Max shapes to use (-1 = all). Fewer = faster.")
-    parser.add_argument("--hungarian_limit", type=int, default=4096,
-                        help="Use Hungarian for N <= this, nearest-neighbor above.")
+                        help="Max shapes to load (-1 = all).")
+    parser.add_argument("--n_probe", type=int, default=100,
+                        help="Number of random shapes to compare against when "
+                             "finding the most central shape. Higher = more "
+                             "accurate but slower.")
     args = parser.parse_args()
 
     train_dir = Path(args.data_root) / "train"
@@ -160,12 +105,8 @@ def main():
     if 0 < args.max_shapes < len(files):
         files = files[:args.max_shapes]
 
-    use_hungarian = args.n_points <= args.hungarian_limit
-    method_name = "Hungarian (exact)" if use_hungarian else "Nearest-neighbor (greedy)"
-
     print(f"Found {len(files)} training shapes in {train_dir}")
     print(f"Subsampling each to {args.n_points} points via FPS")
-    print(f"Alignment method: {method_name}")
 
     # --- Load and normalize all shapes ---
     np.random.seed(42)  # reproducible FPS
@@ -180,33 +121,47 @@ def main():
 
     print(f"Loaded {len(all_shapes)} shapes, each ({args.n_points}, 3)")
 
-    # --- Pick reference shape (first one) ---
-    reference = all_shapes[0].copy()
-    print(f"Reference shape: {files[0].name}")
+    # --- Find most central shape ---
+    # Compare each shape against a random probe set to find the one
+    # with lowest average Chamfer distance (= most "central")
+    n_total = len(all_shapes)
+    n_probe = min(args.n_probe, n_total)
 
-    # --- Align all shapes to reference ---
-    align_fn = align_hungarian if use_hungarian else align_nearest_neighbor
-    aligned_shapes = [reference]  # reference is already aligned to itself
+    probe_indices = np.random.choice(n_total, n_probe, replace=False)
+    probe_shapes = [all_shapes[i] for i in probe_indices]
 
-    for i in range(1, len(all_shapes)):
-        aligned = align_fn(all_shapes[i], reference)
-        aligned_shapes.append(aligned)
-        if (i + 1) % 50 == 0 or i == len(all_shapes) - 1:
-            print(f"  Aligned {i + 1}/{len(all_shapes)}")
+    print(f"\nComputing centrality scores against {n_probe} probe shapes...")
+    best_idx = 0
+    best_score = float("inf")
 
-    # --- Average ---
-    aligned_stack = np.stack(aligned_shapes, axis=0)  # [K, N, 3]
-    mean_shape = aligned_stack.mean(axis=0)            # [N, 3]
+    for i in range(n_total):
+        total_cd = 0.0
+        for probe in probe_shapes:
+            total_cd += chamfer_distance_np(all_shapes[i], probe)
+        avg_cd = total_cd / n_probe
 
-    # Re-normalize to unit sphere
-    mean_shape = normalize_to_unit_sphere(mean_shape)
+        if avg_cd < best_score:
+            best_score = avg_cd
+            best_idx = i
 
-    np.save(args.output, mean_shape)
-    print(f"\nMean shape saved to {args.output}  (shape: {mean_shape.shape})")
+        if (i + 1) % 100 == 0 or i == n_total - 1:
+            print(f"  Evaluated {i + 1}/{n_total} | "
+                  f"Current best: shape {best_idx} (avg CD = {best_score:.6f})")
+
+    # --- Save the most central shape as template ---
+    template = all_shapes[best_idx]
+
+    # Re-normalize just in case
+    template = normalize_to_unit_sphere(template)
+
+    np.save(args.output, template)
+    print(f"\nTemplate saved to {args.output}  (shape: {template.shape})")
+    print(f"Selected shape index: {best_idx}  ({files[best_idx].name})")
+    print(f"Average Chamfer distance to probe set: {best_score:.6f}")
 
     # --- Quick quality check ---
-    bbox_min = mean_shape.min(axis=0)
-    bbox_max = mean_shape.max(axis=0)
+    bbox_min = template.min(axis=0)
+    bbox_max = template.max(axis=0)
     bbox_size = bbox_max - bbox_min
     print(f"Bounding box: min={np.array2string(bbox_min, precision=3)}, "
           f"max={np.array2string(bbox_max, precision=3)}")
