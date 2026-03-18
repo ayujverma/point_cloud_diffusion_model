@@ -11,6 +11,14 @@ Loads .npy point cloud files from the Human.PC15k directory structure::
 
 Each .npy file contains a single point cloud of shape (N, 3).
 
+Subsampling strategy
+--------------------
+When ``n_points > 0`` and the raw cloud has more points, we use Farthest
+Point Sampling (FPS) to select a well-distributed subset.  FPS is performed
+on CPU (numpy) at data-load time so the full-resolution cloud never reaches
+the GPU.  Each epoch uses a different random seed point for FPS, providing
+mild data augmentation.
+
 DDP-aware features
 ------------------
 - Optional fast I/O path: copies data to a local scratch directory (e.g.
@@ -31,6 +39,40 @@ import torch
 from torch.utils.data import Dataset
 
 
+# ---------------------------------------------------------------------------
+# CPU-based FPS for use in dataset __getitem__
+# ---------------------------------------------------------------------------
+
+def _fps_numpy(pts: np.ndarray, n: int) -> np.ndarray:
+    """
+    Farthest Point Sampling on CPU (numpy).
+
+    Selects `n` points from `pts` [M, 3] with maximal spatial coverage.
+    Uses a random seed point each call for data augmentation.
+
+    Returns
+    -------
+    sampled : [n, 3]
+    """
+    M = pts.shape[0]
+    if M <= n:
+        # Not enough points — resample with replacement to pad
+        extra_idx = np.random.choice(M, n - M, replace=True)
+        return np.concatenate([pts, pts[extra_idx]], axis=0)
+
+    # Random seed point
+    selected = [np.random.randint(M)]
+    dists = np.full(M, np.inf, dtype=np.float32)
+
+    for _ in range(n - 1):
+        last = pts[selected[-1]]
+        d = np.sum((pts - last) ** 2, axis=1)
+        dists = np.minimum(dists, d)
+        selected.append(int(np.argmax(dists)))
+
+    return pts[np.array(selected)]
+
+
 class PointCloudDataset(Dataset):
     """
     Dataset that loads .npy point cloud files.
@@ -40,11 +82,9 @@ class PointCloudDataset(Dataset):
     root : str or Path
         Path to the split folder (e.g. ``data/human/train``).
     n_points : int
-        Number of points to (sub)sample from each cloud.  If the raw cloud
-        has more points, we randomly subsample; if fewer, we resample with
-        replacement.  Set to ``-1`` to return **all** points (for full-
-        resolution inference); in this case the DataLoader must use
-        ``batch_size=1`` or a custom collate function.
+        Number of points to subsample from each cloud via FPS.
+        Set to ``-1`` to return **all** points (for full-resolution use);
+        in that case the DataLoader must use ``batch_size=1``.
     normalise : bool
         If True, centre each cloud at origin and scale to unit sphere.
     local_scratch : str or None
@@ -88,26 +128,25 @@ class PointCloudDataset(Dataset):
         Returns
         -------
         points : torch.Tensor  [n_points, 3]  (or [M, 3] if n_points == -1)
-            A single point cloud, optionally normalised.
+            A single point cloud, normalised and FPS-subsampled.
         """
         pts = np.load(self.files[idx]).astype(np.float32)        # [M, 3]
 
-        # (Sub)sample to exactly n_points, unless -1 (full resolution)
-        if self.n_points > 0:
-            M = pts.shape[0]
-            if M >= self.n_points:
-                choice = np.random.choice(M, self.n_points, replace=False)
-            else:
-                choice = np.random.choice(M, self.n_points, replace=True)
-            pts = pts[choice]
-
-        # Normalise: centre + scale to unit sphere
+        # Normalise FIRST (before FPS) so FPS operates on the normalised cloud
         if self.normalise:
             centroid = pts.mean(axis=0)
             pts = pts - centroid
             max_dist = np.max(np.linalg.norm(pts, axis=1))
             if max_dist > 1e-8:
                 pts = pts / max_dist
+
+        # FPS subsample to n_points (unless -1 = use all points)
+        if self.n_points > 0 and pts.shape[0] > self.n_points:
+            pts = _fps_numpy(pts, self.n_points)
+        elif self.n_points > 0 and pts.shape[0] < self.n_points:
+            # Pad with resampled points if too few
+            extra_idx = np.random.choice(pts.shape[0], self.n_points - pts.shape[0], replace=True)
+            pts = np.concatenate([pts, pts[extra_idx]], axis=0)
 
         return torch.from_numpy(pts)                             # [N, 3]
 
