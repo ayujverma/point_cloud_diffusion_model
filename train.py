@@ -8,6 +8,7 @@ A production-grade DDP training loop with:
   • Gradient clipping, mixed-precision (AMP), learning-rate warmup + cosine decay
   • Periodic checkpointing with automatic resume
   • Validation loss tracking for early stopping / model selection
+  • Training-time visualization every --vis_every epochs
 
 Usage (single-node, single-GPU — for debugging)::
 
@@ -32,6 +33,8 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
+
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -41,6 +44,7 @@ from torch.amp import GradScaler, autocast
 from models.vn_transformer import FlowTransformer
 from core.flow_matcher import RectifiedFlowMatcher
 from core.dataset import build_dataloaders
+from core.point_ops import farthest_point_sample, fps_gather
 
 
 # ---------------------------------------------------------------------------
@@ -54,10 +58,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--data_root", type=str, default="data/human",
                    help="Path to dataset root containing train/val/test folders.")
     p.add_argument("--n_points", type=int, default=2048,
-                   help="Number of points loaded per cloud from disk (full resolution).")
+                   help="Template size and inference resolution (e.g. 2048).")
     p.add_argument("--train_n_points", type=int, default=2048,
-                   help="FPS subsample size during training. Set to 0 to disable "
-                        "subsampling (use all n_points). E.g. 2048 or 4096.")
+                   help="FPS subsample size during training. Must be <= n_points. "
+                        "The dataset loads full resolution and FPS happens in flow_matcher.")
     p.add_argument("--local_scratch", type=str, default=None,
                    help="Local scratch dir for fast I/O (e.g. /tmp/human).")
 
@@ -80,12 +84,24 @@ def parse_args() -> argparse.Namespace:
     # --- Flow / OT ---
     p.add_argument("--lambda_ot", type=float, default=0.1,
                    help="Sinkhorn divergence loss weight.")
-    p.add_argument("--lambda_reg", type=float, default=0.01,
+    p.add_argument("--lambda_reg", type=float, default=0.001,
                    help="Template regularisation weight.")
-    p.add_argument("--sinkhorn_iters", type=int, default=20,
+    p.add_argument("--lambda_reg_decay", type=float, default=0.995,
+                   help="Per-epoch decay factor for lambda_reg.")
+    p.add_argument("--template_reg_radius", type=float, default=1.5,
+                   help="Target norm for template regularisation.")
+    p.add_argument("--lambda_chamfer", type=float, default=0.1,
+                   help="Chamfer distance loss weight.")
+    p.add_argument("--lambda_repulsion", type=float, default=0.01,
+                   help="Repulsion loss weight.")
+    p.add_argument("--sinkhorn_iters", type=int, default=50,
                    help="Sinkhorn iterations for assignment.")
-    p.add_argument("--sinkhorn_reg", type=float, default=0.05,
-                   help="Sinkhorn entropic regularisation.")
+    p.add_argument("--sinkhorn_reg", type=float, default=0.01,
+                   help="Sinkhorn entropic regularisation (lower = sharper).")
+    p.add_argument("--use_hard_assignment", action="store_true", default=True,
+                   help="Use hard 1-to-1 assignment after Sinkhorn (default: True).")
+    p.add_argument("--no_hard_assignment", action="store_true",
+                   help="Disable hard assignment (use soft Sinkhorn permutation).")
 
     # --- Training ---
     p.add_argument("--epochs", type=int, default=300)
@@ -95,6 +111,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--weight_decay", type=float, default=1e-5)
     p.add_argument("--warmup_epochs", type=int, default=10)
     p.add_argument("--grad_clip", type=float, default=1.0)
+    p.add_argument("--template_init", type=str, default=None,
+                   help="Path to .npy mean shape for template init (overrides Fibonacci sphere).")
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--amp", action="store_true", default=True,
                    help="Use automatic mixed precision.")
@@ -102,6 +120,12 @@ def parse_args() -> argparse.Namespace:
                    help="Disable AMP.")
     p.add_argument("--grad_ckpt", action="store_true", default=False,
                    help="Enable gradient checkpointing to reduce VRAM (~30%% slower, ~4x less memory).")
+
+    # --- Visualization ---
+    p.add_argument("--vis_every", type=int, default=50,
+                   help="Visualize training progress every N epochs.")
+    p.add_argument("--vis_dir", type=str, default=None,
+                   help="Directory to save visualization PNGs (default: ckpt_dir/vis).")
 
     # --- Logging / Checkpointing ---
     p.add_argument("--wandb_project", type=str, default="rectified-flow-pc",
@@ -122,6 +146,10 @@ def parse_args() -> argparse.Namespace:
     args = p.parse_args()
     if args.no_amp:
         args.amp = False
+    if args.no_hard_assignment:
+        args.use_hard_assignment = False
+    if args.vis_dir is None:
+        args.vis_dir = os.path.join(args.ckpt_dir, "vis")
     return args
 
 
@@ -214,6 +242,115 @@ def load_checkpoint(
 
 
 # ---------------------------------------------------------------------------
+# Training-time visualization
+# ---------------------------------------------------------------------------
+
+def visualize_training_progress(
+    flow_matcher: nn.Module,
+    val_loader: torch.utils.data.DataLoader,
+    device: torch.device,
+    epoch: int,
+    vis_dir: str,
+    n_samples: int = 2,
+    n_steps: int = 10,
+    wandb_run=None,
+):
+    """
+    Visualize flow progress: Template → Flowed → Target.
+
+    Picks n_samples from the validation set, runs a quick Euler integration,
+    and renders a 3-panel matplotlib figure saved as PNG.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D
+
+    os.makedirs(vis_dir, exist_ok=True)
+
+    # Get the raw model (unwrap DDP)
+    raw_fm = flow_matcher.module if hasattr(flow_matcher, "module") else flow_matcher
+    raw_model = raw_fm.model
+    raw_fm.eval()
+
+    # Grab n_samples from validation set
+    vis_targets = []
+    for batch in val_loader:
+        batch = batch.to(device)
+        for i in range(batch.shape[0]):
+            vis_targets.append(batch[i:i+1])
+            if len(vis_targets) >= n_samples:
+                break
+        if len(vis_targets) >= n_samples:
+            break
+
+    template = raw_model.get_template(1).detach().cpu().squeeze(0).numpy()  # [N, 3]
+
+    for idx, target_batch in enumerate(vis_targets):
+        # FPS target to training resolution
+        N = target_batch.shape[1]
+        n_train = raw_fm.train_n_points
+        if n_train > 0 and n_train < N:
+            fps_idx = farthest_point_sample(target_batch, n_train)
+            target_sub = fps_gather(target_batch, fps_idx)
+        else:
+            target_sub = target_batch
+
+        with torch.no_grad():
+            trajectory = raw_fm.sample(
+                target_sub,
+                n_steps=n_steps,
+                method="euler",
+            )
+        flowed = trajectory[-1, 0].cpu().numpy()                  # [N, 3]
+        target_np = target_sub[0].cpu().numpy()                   # [N, 3]
+
+        # Render 3-panel figure
+        fig = plt.figure(figsize=(18, 6))
+
+        for panel_idx, (data, title) in enumerate([
+            (template, "Template (Canonical)"),
+            (flowed, f"Flowed (Epoch {epoch})"),
+            (target_np, "Target"),
+        ]):
+            ax = fig.add_subplot(1, 3, panel_idx + 1, projection="3d")
+            # Color by height (z-coordinate) for visual structure
+            colors = data[:, 1]  # use y-coordinate for coloring
+            ax.scatter(
+                data[:, 0], data[:, 1], data[:, 2],
+                c=colors, cmap="viridis", s=1.0, alpha=0.7,
+            )
+            ax.set_title(title, fontsize=14, fontweight="bold")
+            ax.set_xlim(-1.2, 1.2)
+            ax.set_ylim(-1.2, 1.2)
+            ax.set_zlim(-1.2, 1.2)
+            ax.set_xlabel("X")
+            ax.set_ylabel("Y")
+            ax.set_zlabel("Z")
+
+        fig.suptitle(f"Training Progress — Epoch {epoch}", fontsize=16, fontweight="bold")
+        plt.tight_layout()
+
+        save_path = os.path.join(vis_dir, f"epoch_{epoch:04d}_sample_{idx}.png")
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  [Vis] Saved → {save_path}")
+
+        # Log to W&B
+        if wandb_run is not None:
+            try:
+                import wandb
+                wandb_run.log(
+                    {f"vis/sample_{idx}": wandb.Image(save_path)},
+                    step=epoch,
+                )
+            except Exception:
+                pass
+
+    raw_fm.train()
+
+
+# ---------------------------------------------------------------------------
 # Training & validation loops
 # ---------------------------------------------------------------------------
 
@@ -229,7 +366,9 @@ def train_one_epoch(
 ) -> dict[str, float]:
     """Run one training epoch.  Returns dict of average losses."""
     flow_matcher.train()
-    running = {"loss": 0.0, "loss_velocity": 0.0, "loss_ot": 0.0, "loss_reg": 0.0}
+    loss_keys = ["loss", "loss_velocity", "loss_ot", "loss_reg",
+                 "loss_chamfer", "loss_repulsion"]
+    running = {k: 0.0 for k in loss_keys}
     n_batches = 0
 
     for batch_idx, points in enumerate(loader):
@@ -270,7 +409,9 @@ def validate(
 ) -> dict[str, float]:
     """Run validation.  Returns dict of average losses."""
     flow_matcher.eval()
-    running = {"loss": 0.0, "loss_velocity": 0.0, "loss_ot": 0.0, "loss_reg": 0.0}
+    loss_keys = ["loss", "loss_velocity", "loss_ot", "loss_reg",
+                 "loss_chamfer", "loss_repulsion"]
+    running = {k: 0.0 for k in loss_keys}
     n_batches = 0
 
     for points in loader:
@@ -316,9 +457,11 @@ def main():
             print(f"  [Warning] wandb init failed ({e}) — logging disabled.")
 
     # ---- Build data loaders ----
+    # Dataset loads full 15k from disk and FPS-subsamples to n_points (2048)
+    # on CPU during __getitem__.  The GPU only ever sees [B, 2048, 3].
     loaders = build_dataloaders(
         data_root=args.data_root,
-        n_points=args.n_points,
+        n_points=args.n_points,  # FPS to 2048 in dataset
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         local_scratch=args.local_scratch,
@@ -327,9 +470,13 @@ def main():
     train_loader = loaders["train"]
     val_loader = loaders.get("val")
 
+    if is_main_process(rank):
+        sample = next(iter(train_loader))
+        print(f"  Data: FPS in dataset → batch shape = {list(sample.shape)}")
+
     # ---- Build model ----
     model = FlowTransformer(
-        n_points=args.n_points,
+        n_points=args.n_points,  # Template size = 2048
         channels=args.channels,
         n_heads=args.n_heads,
         enc_depth=args.enc_depth,
@@ -340,24 +487,40 @@ def main():
         use_checkpoint=args.grad_ckpt,
     ).to(device)
 
+    # ---- Load mean shape template (if provided) ----
+    if args.template_init:
+        mean_shape = np.load(args.template_init).astype(np.float32)
+        assert mean_shape.shape == (args.n_points, 3), (
+            f"template_init shape {mean_shape.shape} != expected ({args.n_points}, 3)"
+        )
+        with torch.no_grad():
+            model.template.copy_(torch.from_numpy(mean_shape).unsqueeze(0))
+        if is_main_process(rank):
+            print(f"  Template initialised from {args.template_init}")
+
     if is_main_process(rank):
         n_params = sum(p.numel() for p in model.parameters()) / 1e6
         print(f"  Model parameters: {n_params:.2f}M")
-        print(f"  Template:  {args.n_points} pts (full)  |  "
-              f"Train subsample: {args.train_n_points or 'disabled'}  |  "
+        print(f"  Template:  {args.n_points} pts  |  "
+              f"Train subsample: {args.train_n_points}  |  "
               f"KNN-k: {args.knn_k or 'global'}")
-
-    # Wrap in DDP if multi-GPU
-    # (Moved to wrap flow_matcher instead, since flow_matcher calls non-forward model methods)
+        print(f"  Sinkhorn: reg={args.sinkhorn_reg}, iters={args.sinkhorn_iters}, "
+              f"hard={args.use_hard_assignment}")
+        print(f"  Losses: λ_ot={args.lambda_ot}, λ_reg={args.lambda_reg}, "
+              f"λ_chamfer={args.lambda_chamfer}, λ_repulsion={args.lambda_repulsion}")
 
     # ---- Flow Matcher (training wrapper) ----
     flow_matcher = RectifiedFlowMatcher(
         model=model,
         lambda_ot=args.lambda_ot,
         lambda_reg=args.lambda_reg,
+        lambda_chamfer=args.lambda_chamfer,
+        lambda_repulsion=args.lambda_repulsion,
         sinkhorn_iters=args.sinkhorn_iters,
         sinkhorn_reg=args.sinkhorn_reg,
         train_n_points=args.train_n_points,
+        use_hard_assignment=args.use_hard_assignment,
+        template_reg_radius=args.template_reg_radius,
     ).to(device)
 
     if world_size > 1:
@@ -383,6 +546,9 @@ def main():
             args.resume, model, optimiser, scaler, device,
         )
 
+    # Current lambda_reg (will decay over training)
+    current_lambda_reg = args.lambda_reg
+
     # ================================================================
     #  Training loop
     # ================================================================
@@ -398,6 +564,12 @@ def main():
         for pg in optimiser.param_groups:
             pg["lr"] = lr
 
+        # Decay lambda_reg
+        if epoch > 0:
+            current_lambda_reg *= args.lambda_reg_decay
+            raw_fm = flow_matcher.module if hasattr(flow_matcher, "module") else flow_matcher
+            raw_fm.lambda_reg = current_lambda_reg
+
         # ---- Train ----
         train_metrics = train_one_epoch(
             flow_matcher, train_loader, optimiser, scaler, device, epoch, args, rank,
@@ -410,11 +582,20 @@ def main():
         if val_loader is not None and (epoch + 1) % args.val_every == 0:
             val_metrics = validate(flow_matcher, val_loader, device, args)
 
+        # ---- Visualization (rank-0) ----
+        if is_main_process(rank) and val_loader is not None and (epoch + 1) % args.vis_every == 0:
+            visualize_training_progress(
+                flow_matcher, val_loader, device, epoch,
+                vis_dir=args.vis_dir,
+                wandb_run=wandb_run,
+            )
+
         # ---- Logging (rank-0) ----
         if is_main_process(rank):
             log = {
                 "epoch": epoch,
                 "lr": lr,
+                "lambda_reg": current_lambda_reg,
                 "time_s": epoch_time,
                 **{f"train/{k}": v for k, v in train_metrics.items()},
             }
@@ -426,8 +607,11 @@ def main():
                 f"Train Loss: {train_metrics['loss']:.5f} | "
                 f"Vel: {train_metrics['loss_velocity']:.5f} | "
                 f"OT: {train_metrics['loss_ot']:.5f} | "
+                f"CD: {train_metrics['loss_chamfer']:.5f} | "
+                f"Rep: {train_metrics['loss_repulsion']:.5f} | "
                 f"Reg: {train_metrics['loss_reg']:.5f} | "
                 f"LR: {lr:.2e} | "
+                f"λ_reg: {current_lambda_reg:.2e} | "
                 f"Time: {epoch_time:.1f}s"
             )
             if val_metrics:
