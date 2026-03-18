@@ -21,7 +21,7 @@ DATA_ROOT="$REPO_DIR/data/human"
 OUTPUT_DIR="$REPO_DIR/results/mean_shape"
 OUTPUT_FILE="${OUTPUT_DIR}/mean_shape_test.npy"
 N_POINTS=2048
-MAX_SHAPES=5
+MAX_SHAPES=4000
 
 echo "=========================================="
 echo " TESTING — local Mean Shape Computation  "
