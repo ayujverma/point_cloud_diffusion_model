@@ -16,12 +16,12 @@ Usage
         --output data/mean_shape_2048.npy
 """
 
-from __future__ import annotations
-
 import argparse
 from pathlib import Path
+import time
 
 import numpy as np
+import torch
 
 
 def normalize_to_unit_sphere(pts: np.ndarray) -> np.ndarray:
@@ -128,25 +128,59 @@ def main():
     n_probe = min(args.n_probe, n_total)
 
     probe_indices = np.random.choice(n_total, n_probe, replace=False)
-    probe_shapes = [all_shapes[i] for i in probe_indices]
+    probe_shapes = np.stack([all_shapes[i] for i in probe_indices])  # [n_probe, N, 3]
+    all_shapes_tensor = np.stack(all_shapes)  # [n_total, N, 3]
 
     print(f"\nComputing centrality scores against {n_probe} probe shapes...")
-    best_idx = 0
-    best_score = float("inf")
+    start_time = time.time()
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device} for Chamfer Distance calculations")
 
-    for i in range(n_total):
-        total_cd = 0.0
-        for probe in probe_shapes:
-            total_cd += chamfer_distance_np(all_shapes[i], probe)
-        avg_cd = total_cd / n_probe
+    # Move data to PyTorch
+    shapes_pt = torch.from_numpy(all_shapes_tensor).to(device)  # [5000, 2048, 3]
+    probes_pt = torch.from_numpy(probe_shapes).to(device)       # [100, 2048, 3]
+    
+    # We want average CD over probes for each shape.
+    # We can batch over the probes to avoid MemoryError if running all 5000 x 100 at once.
+    total_cd = torch.zeros(n_total, device=device)
+    
+    # Batch size for evaluating probes against all shapes
+    # 5000 shapes * 1 probe = 5000 pairs of (2048x3). Fits easily in GPU.
+    batch_size = 128
+    
+    for p_idx in range(n_probe):
+        probe = probes_pt[p_idx:p_idx+1]  # [1, 2048, 3]
+        
+        for i in range(0, n_total, batch_size):
+            batch = shapes_pt[i:i+batch_size]  # [B, 2048, 3]
+            
+            # cdist: [B, N, M] where N=2048, M=2048
+            dists = torch.cdist(batch, probe)  # [B, 2048, 2048]
+            
+            # min distances
+            min_a_to_b, _ = dists.min(dim=2)  # [B, 2048]
+            min_b_to_a, _ = dists.min(dim=1)  # [B, 2048]
+            
+            # chamfer: squared distance usually, but since the dists is L2 norm, 
+            # we need squared distance to match original CD definition
+            # Actually, the original CD used `diff ** 2`. `torch.cdist` returns sqrt(sum(diff**2)).
+            # So we square it:
+            sq_dists = dists ** 2
+            
+            min_a_to_b_sq, _ = sq_dists.min(dim=2)
+            min_b_to_a_sq, _ = sq_dists.min(dim=1)
+            
+            cd = min_a_to_b_sq.mean(dim=1) + min_b_to_a_sq.mean(dim=1)  # [B]
+            total_cd[i:i+batch_size] += cd
 
-        if avg_cd < best_score:
-            best_score = avg_cd
-            best_idx = i
-
-        if (i + 1) % 100 == 0 or i == n_total - 1:
-            print(f"  Evaluated {i + 1}/{n_total} | "
-                  f"Current best: shape {best_idx} (avg CD = {best_score:.6f})")
+    avg_cd = total_cd / n_probe  # [5000]
+    
+    best_idx = torch.argmin(avg_cd).item()
+    best_score = avg_cd[best_idx].item()
+    
+    end_time = time.time()
+    print(f"Alignment completed in {end_time - start_time:.2f} seconds.")
 
     # --- Save the most central shape as template ---
     template = all_shapes[best_idx]

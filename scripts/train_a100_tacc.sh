@@ -117,10 +117,10 @@ if [ ! -f "$MEAN_SHAPE" ]; then
     echo "Computing mean training shape..."
     source /work/10692/ayuj/miniconda3/etc/profile.d/conda.sh
     conda activate rectflow
-    python ${REPO_DIR}/compute_mean_shape.py \
-        --data_root ${LOCAL_SCRATCH} \
-        --n_points ${N_POINTS} \
-        --output ${MEAN_SHAPE}
+    python "${REPO_DIR}/compute_mean_shape.py" \
+        --data_root "${LOCAL_SCRATCH}" \
+        --n_points "${N_POINTS}" \
+        --output "${MEAN_SHAPE}"
     echo "Mean shape computed: $MEAN_SHAPE"
 else
     echo "Mean shape already exists: $MEAN_SHAPE"

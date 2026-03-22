@@ -128,7 +128,6 @@ if [ ! -f "$MEAN_SHAPE" ]; then
         --data_root ${LOCAL_SCRATCH} \
         --n_points ${N_POINTS} \
         --output ${MEAN_SHAPE}
-
     echo "Mean shape computed: $MEAN_SHAPE"
 else
     echo "Mean shape already exists: $MEAN_SHAPE"

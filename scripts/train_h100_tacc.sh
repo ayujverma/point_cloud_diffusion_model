@@ -121,8 +121,7 @@ if [ ! -f "$MEAN_SHAPE" ]; then
     python ${REPO_DIR}/compute_mean_shape.py \
         --data_root ${LOCAL_SCRATCH} \
         --n_points ${N_POINTS} \
-        --output ${MEAN_SHAPE} \
-        --hungarian_limit 4096
+        --output ${MEAN_SHAPE}
     echo "Mean shape computed: $MEAN_SHAPE"
 else
     echo "Mean shape already exists: $MEAN_SHAPE"
